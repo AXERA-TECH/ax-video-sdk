@@ -1,4 +1,4 @@
-#include "ax_pipeline_osd_internal.h"
+#include "common/ax_drawer.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -16,7 +16,7 @@
 #include "ax_image_internal.h"
 #include "common/ax_system.h"
 
-namespace axvsdk::pipeline::internal {
+namespace axvsdk::common::internal {
 
 namespace {
 
@@ -46,66 +46,66 @@ bool FitsAxSize(std::uint32_t value) noexcept {
     return value > 0 && value <= static_cast<std::uint32_t>(std::numeric_limits<AX_U16>::max());
 }
 
-AX_IMG_FORMAT_E ToAxBitmapFormat(PipelineOsdBitmapFormat format) noexcept {
+AX_IMG_FORMAT_E ToAxBitmapFormat(DrawBitmapFormat format) noexcept {
     switch (format) {
-    case PipelineOsdBitmapFormat::kArgb8888:
+    case DrawBitmapFormat::kArgb8888:
         return AX_FORMAT_ARGB8888;
-    case PipelineOsdBitmapFormat::kRgba8888:
+    case DrawBitmapFormat::kRgba8888:
         return AX_FORMAT_RGBA8888;
-    case PipelineOsdBitmapFormat::kArgb1555:
+    case DrawBitmapFormat::kArgb1555:
         return AX_FORMAT_ARGB1555;
-    case PipelineOsdBitmapFormat::kRgba5551:
+    case DrawBitmapFormat::kRgba5551:
         return AX_FORMAT_RGBA5551;
-    case PipelineOsdBitmapFormat::kArgb4444:
+    case DrawBitmapFormat::kArgb4444:
         return AX_FORMAT_ARGB4444;
-    case PipelineOsdBitmapFormat::kRgba4444:
+    case DrawBitmapFormat::kRgba4444:
         return AX_FORMAT_RGBA4444;
-    case PipelineOsdBitmapFormat::kArgb8565:
+    case DrawBitmapFormat::kArgb8565:
         return AX_FORMAT_ARGB8565;
-    case PipelineOsdBitmapFormat::kRgb888:
+    case DrawBitmapFormat::kRgb888:
         return AX_FORMAT_RGB888;
-    case PipelineOsdBitmapFormat::kRgb565:
+    case DrawBitmapFormat::kRgb565:
         return AX_FORMAT_RGB565;
-    case PipelineOsdBitmapFormat::kBitmap1:
+    case DrawBitmapFormat::kBitmap1:
         return AX_FORMAT_BITMAP;
     default:
         return AX_FORMAT_INVALID;
     }
 }
 
-std::size_t BytesPerPixel(PipelineOsdBitmapFormat format) noexcept {
+std::size_t BytesPerPixel(DrawBitmapFormat format) noexcept {
     switch (format) {
-    case PipelineOsdBitmapFormat::kArgb8888:
-    case PipelineOsdBitmapFormat::kRgba8888:
+    case DrawBitmapFormat::kArgb8888:
+    case DrawBitmapFormat::kRgba8888:
         return 4;
-    case PipelineOsdBitmapFormat::kArgb1555:
-    case PipelineOsdBitmapFormat::kRgba5551:
-    case PipelineOsdBitmapFormat::kArgb4444:
-    case PipelineOsdBitmapFormat::kRgba4444:
-    case PipelineOsdBitmapFormat::kRgb565:
+    case DrawBitmapFormat::kArgb1555:
+    case DrawBitmapFormat::kRgba5551:
+    case DrawBitmapFormat::kArgb4444:
+    case DrawBitmapFormat::kRgba4444:
+    case DrawBitmapFormat::kRgb565:
         return 2;
-    case PipelineOsdBitmapFormat::kArgb8565:
-    case PipelineOsdBitmapFormat::kRgb888:
+    case DrawBitmapFormat::kArgb8565:
+    case DrawBitmapFormat::kRgb888:
         return 3;
-    case PipelineOsdBitmapFormat::kBitmap1:
+    case DrawBitmapFormat::kBitmap1:
     default:
         return 0;
     }
 }
 
-std::size_t BitmapRowBytes(const PipelineOsdBitmap& bitmap) noexcept {
+std::size_t BitmapRowBytes(const DrawBitmap& bitmap) noexcept {
     if (bitmap.width == 0) {
         return 0;
     }
 
-    if (bitmap.format == PipelineOsdBitmapFormat::kBitmap1) {
+    if (bitmap.format == DrawBitmapFormat::kBitmap1) {
         return (bitmap.width + 7U) / 8U;
     }
 
     return static_cast<std::size_t>(bitmap.width) * BytesPerPixel(bitmap.format);
 }
 
-std::size_t BitmapByteSize(const PipelineOsdBitmap& bitmap) noexcept {
+std::size_t BitmapByteSize(const DrawBitmap& bitmap) noexcept {
     const auto row_bytes = BitmapRowBytes(bitmap);
     if (row_bytes == 0 || bitmap.height == 0) {
         return 0;
@@ -113,19 +113,19 @@ std::size_t BitmapByteSize(const PipelineOsdBitmap& bitmap) noexcept {
     return row_bytes * bitmap.height;
 }
 
-AX_IVPS_MOSAIC_BLK_SIZE_E ToAxBlockSize(PipelineOsdMosaicBlockSize size) noexcept {
+AX_IVPS_MOSAIC_BLK_SIZE_E ToAxBlockSize(DrawMosaicBlockSize size) noexcept {
     switch (size) {
-    case PipelineOsdMosaicBlockSize::k2:
+    case DrawMosaicBlockSize::k2:
         return AX_IVPS_MOSAIC_BLK_SIZE_2;
-    case PipelineOsdMosaicBlockSize::k4:
+    case DrawMosaicBlockSize::k4:
         return AX_IVPS_MOSAIC_BLK_SIZE_4;
-    case PipelineOsdMosaicBlockSize::k8:
+    case DrawMosaicBlockSize::k8:
         return AX_IVPS_MOSAIC_BLK_SIZE_8;
-    case PipelineOsdMosaicBlockSize::k16:
+    case DrawMosaicBlockSize::k16:
         return AX_IVPS_MOSAIC_BLK_SIZE_16;
-    case PipelineOsdMosaicBlockSize::k32:
+    case DrawMosaicBlockSize::k32:
         return AX_IVPS_MOSAIC_BLK_SIZE_32;
-    case PipelineOsdMosaicBlockSize::k64:
+    case DrawMosaicBlockSize::k64:
     default:
         return AX_IVPS_MOSAIC_BLK_SIZE_64;
     }
@@ -194,7 +194,7 @@ bool BuildCanvas(common::AxImage& image, AX_IVPS_RGN_CANVAS_INFO_T* canvas) {
     return true;
 }
 
-bool MakeAxPoints(const std::vector<PipelineOsdPoint>& points, std::vector<AX_IVPS_POINT_T>* ax_points) {
+bool MakeAxPoints(const std::vector<DrawPoint>& points, std::vector<AX_IVPS_POINT_T>* ax_points) {
     if (ax_points == nullptr || points.empty()) {
         return false;
     }
@@ -215,7 +215,7 @@ bool MakeAxPoints(const std::vector<PipelineOsdPoint>& points, std::vector<AX_IV
     return true;
 }
 
-bool PrepareBitmap(const PipelineOsdBitmap& bitmap, PreparedBitmap* prepared_bitmap) {
+bool PrepareBitmap(const DrawBitmap& bitmap, PreparedBitmap* prepared_bitmap) {
     if (prepared_bitmap == nullptr || bitmap.width == 0 || bitmap.height == 0) {
         return false;
     }
@@ -261,9 +261,9 @@ bool PrepareBitmap(const PipelineOsdBitmap& bitmap, PreparedBitmap* prepared_bit
     return true;
 }
 
-class PreparedAx620ePipelineOsd final : public PreparedPipelineOsd {
+class PreparedAx620eDrawCommands final : public PreparedDrawCommands {
 public:
-    explicit PreparedAx620ePipelineOsd(std::uint32_t hold_frames) : hold_frames_(hold_frames) {}
+    explicit PreparedAx620eDrawCommands(std::uint32_t hold_frames) : hold_frames_(hold_frames) {}
 
     std::uint32_t hold_frames() const noexcept override {
         return hold_frames_;
@@ -373,9 +373,9 @@ public:
         return image.FlushCache();
     }
 
-    std::vector<PipelineOsdLine> lines_;
-    std::vector<PipelineOsdPolygon> polygons_;
-    std::vector<PipelineOsdRect> rects_;
+    std::vector<DrawLine> lines_;
+    std::vector<DrawPolygon> polygons_;
+    std::vector<DrawRect> rects_;
     std::vector<AX_IVPS_RGN_MOSAIC_T> mosaics_;
     std::vector<PreparedBitmap> bitmaps_;
 
@@ -383,10 +383,10 @@ private:
     std::uint32_t hold_frames_{1};
 };
 
-class Ax620ePipelineOsdRenderer final : public PipelineOsdRenderer {
+class Ax620eDrawer final : public AxDrawer {
 public:
-    std::shared_ptr<const PreparedPipelineOsd> Prepare(const PipelineOsdFrame& frame) override {
-        auto prepared = std::make_shared<PreparedAx620ePipelineOsd>(frame.hold_frames);
+    std::shared_ptr<const PreparedDrawCommands> Prepare(const DrawFrame& frame) override {
+        auto prepared = std::make_shared<PreparedAx620eDrawCommands>(frame.hold_frames);
         prepared->lines_ = frame.lines;
         prepared->polygons_ = frame.polygons;
         prepared->rects_ = frame.rects;
@@ -418,12 +418,16 @@ public:
 
         return prepared;
     }
+
+    bool Draw(const PreparedDrawCommands& commands, AxImage& image) override {
+        return commands.Apply(image);
+    }
 };
 
 }  // namespace
 
-std::unique_ptr<PipelineOsdRenderer> CreatePlatformPipelineOsdRenderer() {
-    return std::make_unique<Ax620ePipelineOsdRenderer>();
+std::unique_ptr<AxDrawer> CreatePlatformDrawer() {
+    return std::make_unique<Ax620eDrawer>();
 }
 
-}  // namespace axvsdk::pipeline::internal
+}  // namespace axvsdk::common::internal

@@ -128,6 +128,7 @@ message(STATUS "AX SDK libs: ${AXSDK_MSP_LIB_DIR}")
 
 add_library(ax_video_sdk ${AXSDK_LIBRARY_TYPE}
     src/codec/ax_jpeg_codec.cpp
+    src/common/ax_drawer.cpp
     src/common/ax_image.cpp
     src/common/ax_image_copy.cpp
     src/common/ax_image_processor.cpp

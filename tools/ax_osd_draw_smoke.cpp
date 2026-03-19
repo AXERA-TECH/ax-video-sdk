@@ -5,8 +5,8 @@
 #include <string>
 
 #include "ax_cmdline_utils.h"
-#include "ax_pipeline_osd_internal.h"
 #include "codec/ax_jpeg_codec.h"
+#include "common/ax_drawer.h"
 #include "common/ax_image.h"
 #include "common/ax_system.h"
 
@@ -96,17 +96,17 @@ int Run(const std::string& output_path) {
         return 3;
     }
 
-    auto renderer = pipeline::internal::CreatePlatformPipelineOsdRenderer();
-    if (!renderer) {
-        std::cerr << "CreatePlatformPipelineOsdRenderer failed\n";
+    auto drawer = common::CreateDrawer();
+    if (!drawer) {
+        std::cerr << "CreateDrawer failed\n";
         return 4;
     }
 
-    pipeline::PipelineOsdFrame osd{};
+    common::DrawFrame osd{};
     osd.hold_frames = 1;
 
-    pipeline::PipelineOsdBitmap bitmap{};
-    bitmap.format = pipeline::PipelineOsdBitmapFormat::kRgb888;
+    common::DrawBitmap bitmap{};
+    bitmap.format = common::DrawBitmapFormat::kRgb888;
     bitmap.alpha = 255;
     bitmap.width = 16;
     bitmap.height = 16;
@@ -119,7 +119,7 @@ int Run(const std::string& output_path) {
         bitmap.data[index + 2U] = 0;
     }
     osd.bitmaps.push_back(std::move(bitmap));
-    osd.rects.push_back(pipeline::PipelineOsdRect{
+    osd.rects.push_back(common::DrawRect{
         80,
         80,
         120,
@@ -133,17 +133,17 @@ int Run(const std::string& output_path) {
         0,
     });
 
-    auto prepared = renderer->Prepare(osd);
+    auto prepared = drawer->Prepare(osd);
     if (!prepared) {
-        std::cerr << "renderer Prepare failed\n";
+        std::cerr << "drawer Prepare failed\n";
         return 5;
     }
 
     const auto bitmap_sum_before = SumNv12Region(*image, 40, 40, 16, 16);
     const auto rect_sum_before = SumNv12Region(*image, 80, 80, 120, 80);
 
-    if (!prepared->Apply(*image)) {
-        std::cerr << "prepared Apply failed\n";
+    if (!drawer->Draw(*prepared, *image)) {
+        std::cerr << "drawer Draw failed\n";
         return 6;
     }
 

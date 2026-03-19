@@ -15,7 +15,8 @@
 #include "codec/ax_video_decoder.h"
 #include "codec/ax_video_encoder.h"
 #include "ax_image_copy.h"
-#include "ax_pipeline_osd_internal.h"
+#include "ax_drawer_internal.h"
+#include "common/ax_drawer.h"
 #include "common/ax_image.h"
 #include "common/ax_image_processor.h"
 
@@ -319,7 +320,7 @@ public:
         demuxer_ = std::move(demuxer);
         decoder_ = std::move(decoder);
         branches_ = std::move(branches);
-        osd_renderer_ = internal::CreatePlatformPipelineOsdRenderer();
+        drawer_ = common::internal::CreatePlatformDrawer();
         decoded_frames_.store(0, std::memory_order_relaxed);
         branch_submit_failures_.store(0, std::memory_order_relaxed);
         demux_stop_ = false;
@@ -375,7 +376,7 @@ public:
             active_osd_.reset();
             active_osd_remaining_frames_ = 0;
         }
-        osd_renderer_.reset();
+        drawer_.reset();
         config_ = {};
         open_ = false;
     }
@@ -498,7 +499,7 @@ public:
     }
 
     bool SetOsd(const PipelineOsdFrame& osd) override {
-        if (!open_ || !osd_renderer_) {
+        if (!open_ || !drawer_) {
             return false;
         }
 
@@ -509,7 +510,7 @@ public:
             return true;
         }
 
-        auto prepared_osd = osd_renderer_->Prepare(osd);
+        auto prepared_osd = drawer_->Prepare(osd);
         if (!prepared_osd) {
             return false;
         }
@@ -613,7 +614,7 @@ private:
             return;
         }
 
-        std::shared_ptr<const internal::PreparedPipelineOsd> osd_to_apply;
+        std::shared_ptr<const common::PreparedDrawCommands> osd_to_apply;
         {
             std::lock_guard<std::mutex> lock(osd_mutex_);
             ApplyPendingOsdUpdateLocked();
@@ -764,9 +765,9 @@ private:
     std::unique_ptr<common::ImageProcessor> frame_processor_;
 
     std::mutex osd_mutex_;
-    std::unique_ptr<internal::PipelineOsdRenderer> osd_renderer_;
-    std::shared_ptr<const internal::PreparedPipelineOsd> pending_osd_;
-    std::shared_ptr<const internal::PreparedPipelineOsd> active_osd_;
+    std::unique_ptr<common::AxDrawer> drawer_;
+    std::shared_ptr<const common::PreparedDrawCommands> pending_osd_;
+    std::shared_ptr<const common::PreparedDrawCommands> active_osd_;
     std::uint32_t active_osd_remaining_frames_{0};
 };
 
