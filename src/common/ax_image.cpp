@@ -304,6 +304,50 @@ AxImage::Ptr AxImage::Create(const ImageDescriptor& descriptor, const ImageAlloc
     return AxImage::Ptr(new AxImage(std::move(impl)));
 }
 
+AxImage::Ptr AxImage::WrapExternal(const ImageDescriptor& descriptor,
+                                   const std::array<ExternalImagePlane, kMaxImagePlanes>& planes,
+                                   LifetimeHolder lifetime) {
+    if (!IsValidDescriptor(descriptor)) {
+        return nullptr;
+    }
+
+    auto impl = std::make_unique<AxImage::Impl>();
+    impl->InitializeLayout(descriptor);
+    impl->memory_type = MemoryType::kExternal;
+    impl->cache_mode = CacheMode::kNonCached;
+    impl->owns_memory = false;
+    impl->lifetime_holder = std::move(lifetime);
+    std::memset(&impl->frame_info, 0, sizeof(impl->frame_info));
+
+    auto& frame = impl->frame_info.stVFrame;
+    frame.u32Width = impl->descriptor.width;
+    frame.u32Height = impl->descriptor.height;
+    frame.enImgFormat = ToAxFormat(impl->descriptor.format);
+    frame.enVscanFormat = AX_VSCAN_FORMAT_RASTER;
+    frame.stCompressInfo.enCompressMode = AX_COMPRESS_MODE_NONE;
+    frame.stDynamicRange = AX_DYNAMIC_RANGE_SDR8;
+    frame.stColorGamut = AX_COLOR_GAMUT_BT709;
+    frame.u32FrameSize = static_cast<AX_U32>(impl->total_size);
+    impl->frame_info.enModId = AX_ID_USER;
+    impl->frame_info.bEndOfStream = AX_FALSE;
+
+    for (std::size_t index = 0; index < impl->plane_count; ++index) {
+        frame.u32PicStride[index] = static_cast<AX_U32>(impl->descriptor.strides[index]);
+        frame.u64PhyAddr[index] = planes[index].physical_address;
+        frame.u64VirAddr[index] =
+            static_cast<AX_U64>(reinterpret_cast<std::uintptr_t>(planes[index].virtual_address));
+        frame.u32BlkId[index] = planes[index].block_id == kInvalidPoolId ? AX_INVALID_BLOCKID : planes[index].block_id;
+        impl->physical_addresses[index] = planes[index].physical_address;
+        impl->virtual_addresses[index] = planes[index].virtual_address;
+        impl->block_ids[index] = planes[index].block_id;
+        if (planes[index].virtual_address == nullptr) {
+            return nullptr;
+        }
+    }
+
+    return AxImage::Ptr(new AxImage(std::move(impl)));
+}
+
 AxImage::Ptr internal::AxImageAccess::WrapVideoFrame(const AX_VIDEO_FRAME_INFO_T& frame_info,
                                                      FrameReleaseCallback release_callback) {
     const auto format = FromAxFormat(frame_info.stVFrame.enImgFormat);

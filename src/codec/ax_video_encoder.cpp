@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <utility>
 
+#include "common/ax_image_processor.h"
 #include "common/ax_system.h"
 
 namespace axvsdk::codec {
@@ -19,6 +21,7 @@ namespace axvsdk::codec::internal {
 namespace {
 
 constexpr int kEncoderStopIdlePollLimit = 10;
+constexpr std::size_t kEncoderInputFifoDepth = 4;
 
 std::uint32_t EstimateBitrateKbps(VideoCodecType codec,
                                   std::uint32_t width,
@@ -93,6 +96,11 @@ void AxVideoEncoderBase::Close() noexcept {
             pending_frames_.clear();
         }
         {
+            std::lock_guard<std::mutex> lock(staging_mutex_);
+            reusable_frames_.clear();
+            inflight_frames_.clear();
+        }
+        {
             std::lock_guard<std::mutex> lock(packet_mutex_);
             latest_packet_ = {};
             has_latest_packet_ = false;
@@ -147,6 +155,11 @@ void AxVideoEncoderBase::Stop() noexcept {
     {
         std::lock_guard<std::mutex> lock(input_mutex_);
         pending_frames_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(staging_mutex_);
+        reusable_frames_.clear();
+        inflight_frames_.clear();
     }
     input_cv_.notify_all();
 
@@ -222,8 +235,122 @@ const ResolvedVideoEncoderConfig& AxVideoEncoderBase::config() const noexcept {
 }
 
 bool AxVideoEncoderBase::ValidateInputFrame(const common::AxImage& frame) const noexcept {
-    return frame.format() == common::PixelFormat::kNv12 && frame.width() == config_.width &&
-           frame.height() == config_.height;
+    return frame.width() != 0 && frame.height() != 0;
+}
+
+common::AxImage::Ptr AxVideoEncoderBase::AcquireReusableFrame(const common::ImageDescriptor& descriptor,
+                                                              const char* token) {
+    std::lock_guard<std::mutex> lock(staging_mutex_);
+    for (auto it = reusable_frames_.begin(); it != reusable_frames_.end(); ++it) {
+        const auto& candidate = *it;
+        if (!candidate) {
+            continue;
+        }
+        if (candidate->descriptor().format == descriptor.format && candidate->width() == descriptor.width &&
+            candidate->height() == descriptor.height && candidate->stride(0) == descriptor.strides[0] &&
+            candidate->stride(1) == descriptor.strides[1]) {
+            auto frame = std::move(*it);
+            reusable_frames_.erase(it);
+            return frame;
+        }
+    }
+
+    common::ImageAllocationOptions alloc{};
+    alloc.memory_type = common::MemoryType::kCmm;
+    alloc.cache_mode = common::CacheMode::kNonCached;
+    alloc.alignment = 0x1000;
+    alloc.token = token;
+    return common::AxImage::Create(descriptor, alloc);
+}
+
+void AxVideoEncoderBase::RecyclePreparedFrame(common::AxImage::Ptr frame) {
+    if (!frame) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(staging_mutex_);
+    reusable_frames_.push_back(std::move(frame));
+}
+
+void AxVideoEncoderBase::ReleaseOldInflightFrame() {
+    std::lock_guard<std::mutex> lock(staging_mutex_);
+    if (inflight_frames_.size() <= kEncoderInputFifoDepth) {
+        return;
+    }
+    reusable_frames_.push_back(std::move(inflight_frames_.front()));
+    inflight_frames_.pop_front();
+}
+
+PreparedInputFrame AxVideoEncoderBase::PrepareInputFrame(const common::AxImage& frame) {
+    const auto target_stride = static_cast<std::size_t>(config_.width);
+    const bool already_hw_ready =
+        frame.format() == common::PixelFormat::kNv12 &&
+        frame.width() == config_.width &&
+        frame.height() == config_.height &&
+        frame.physical_address(0) != 0 &&
+        frame.virtual_address(0) != nullptr &&
+        frame.stride(0) >= target_stride &&
+        frame.stride(1) >= target_stride;
+    if (already_hw_ready) {
+        return {common::AxImage::Ptr(const_cast<common::AxImage*>(&frame), [](common::AxImage*) {}), false};
+    }
+
+    common::ImageDescriptor target{};
+    target.format = common::PixelFormat::kNv12;
+    target.width = config_.width;
+    target.height = config_.height;
+    target.strides[0] = target_stride;
+    target.strides[1] = target_stride;
+
+    const bool needs_processing = frame.format() != target.format || frame.width() != target.width ||
+                                  frame.height() != target.height || frame.physical_address(0) == 0;
+    if (!needs_processing) {
+        auto output = AcquireReusableFrame(target, "VideoEncoderInput");
+        if (!output || frame.virtual_address(0) == nullptr || frame.virtual_address(1) == nullptr) {
+            return {};
+        }
+        std::memcpy(output->virtual_address(0), frame.virtual_address(0), std::min(output->plane_size(0), frame.plane_size(0)));
+        std::memcpy(output->virtual_address(1), frame.virtual_address(1), std::min(output->plane_size(1), frame.plane_size(1)));
+        return {std::move(output), true};
+    }
+
+    auto processor = common::CreateImageProcessor();
+    if (!processor) {
+        return {};
+    }
+
+    common::AxImage::Ptr source = common::AxImage::Ptr(const_cast<common::AxImage*>(&frame), [](common::AxImage*) {});
+    bool source_reusable = false;
+    if (frame.physical_address(0) == 0) {
+        source = AcquireReusableFrame(frame.descriptor(), "VideoEncoderSource");
+        if (!source || frame.virtual_address(0) == nullptr) {
+            return {};
+        }
+        for (std::size_t plane = 0; plane < frame.plane_count(); ++plane) {
+            if (source->virtual_address(plane) == nullptr || frame.virtual_address(plane) == nullptr) {
+                return {};
+            }
+            std::memcpy(source->virtual_address(plane), frame.virtual_address(plane),
+                        std::min(source->plane_size(plane), frame.plane_size(plane)));
+        }
+        (void)source->FlushCache();
+        source_reusable = true;
+    } else {
+        (void)source->FlushCache();
+    }
+
+    common::ImageProcessRequest request{};
+    request.output_image = target;
+    auto output = AcquireReusableFrame(target, "VideoEncoderInput");
+    if (!output || !processor->Process(*source, request, *output)) {
+        if (source_reusable) {
+            RecyclePreparedFrame(std::move(source));
+        }
+        return {};
+    }
+    if (source_reusable) {
+        RecyclePreparedFrame(std::move(source));
+    }
+    return {std::move(output), true};
 }
 
 void AxVideoEncoderBase::SendLoop() {
@@ -245,8 +372,23 @@ void AxVideoEncoderBase::SendLoop() {
             continue;
         }
 
-        (void)frame->FlushCache();
-        (void)SendFrameToEncoder(*frame);
+        auto prepared = PrepareInputFrame(*frame);
+        if (!prepared.frame) {
+            continue;
+        }
+
+        (void)prepared.frame->FlushCache();
+        if (SendFrameToEncoder(*prepared.frame)) {
+            if (prepared.reusable) {
+                {
+                    std::lock_guard<std::mutex> lock(staging_mutex_);
+                    inflight_frames_.push_back(std::move(prepared.frame));
+                }
+                ReleaseOldInflightFrame();
+            }
+        } else if (prepared.reusable) {
+            RecyclePreparedFrame(std::move(prepared.frame));
+        }
     }
 }
 

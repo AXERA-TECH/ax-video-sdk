@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -50,15 +51,25 @@ struct ImageAllocationOptions {
     std::string token{"AxImage"};
 };
 
+struct ExternalImagePlane {
+    void* virtual_address{nullptr};
+    std::uint64_t physical_address{0};
+    std::uint32_t block_id{kInvalidPoolId};
+};
+
 class AxImage {
 public:
     using Ptr = std::shared_ptr<AxImage>;
+    using LifetimeHolder = std::shared_ptr<void>;
 
     static Ptr Create(PixelFormat format,
                       std::uint32_t width,
                       std::uint32_t height,
                       const ImageAllocationOptions& options = {});
     static Ptr Create(const ImageDescriptor& descriptor, const ImageAllocationOptions& options = {});
+    static Ptr WrapExternal(const ImageDescriptor& descriptor,
+                            const std::array<ExternalImagePlane, kMaxImagePlanes>& planes,
+                            LifetimeHolder lifetime = {});
 
     AxImage(const AxImage&) = delete;
     AxImage& operator=(const AxImage&) = delete;

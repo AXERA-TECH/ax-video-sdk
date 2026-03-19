@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <optional>
 #include <mutex>
 #include <thread>
 
@@ -23,6 +24,11 @@ struct ResolvedVideoEncoderConfig {
     std::size_t input_queue_depth{10};
     QueueOverflowPolicy overflow_policy{QueueOverflowPolicy::kDropOldest};
     std::size_t stream_buffer_size{0};
+};
+
+struct PreparedInputFrame {
+    common::AxImage::Ptr frame;
+    bool reusable{false};
 };
 
 class AxVideoEncoderBase : public VideoEncoder {
@@ -49,8 +55,12 @@ protected:
 
     const ResolvedVideoEncoderConfig& config() const noexcept;
     bool ValidateInputFrame(const common::AxImage& frame) const noexcept;
+    PreparedInputFrame PrepareInputFrame(const common::AxImage& frame);
 
 private:
+    common::AxImage::Ptr AcquireReusableFrame(const common::ImageDescriptor& descriptor, const char* token);
+    void RecyclePreparedFrame(common::AxImage::Ptr frame);
+    void ReleaseOldInflightFrame();
     void SendLoop();
     void StreamLoop();
 
@@ -76,6 +86,10 @@ private:
 
     std::mutex callback_mutex_;
     PacketCallback packet_callback_;
+
+    std::mutex staging_mutex_;
+    std::deque<common::AxImage::Ptr> reusable_frames_;
+    std::deque<common::AxImage::Ptr> inflight_frames_;
 };
 
 std::unique_ptr<VideoEncoder> CreatePlatformVideoEncoder();
