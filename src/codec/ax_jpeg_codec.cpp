@@ -436,9 +436,11 @@ std::vector<std::uint8_t> EncodeJpegBytes(const common::AxImage& image,
     }
     encode_param.ulPhyAddr = stream_phy_addr;
     encode_param.pu8Addr = static_cast<AX_U8*>(stream_vir_addr);
-    encode_param.u32OutBufSize = stream_buffer_size;
     encode_param.u32Len = stream_buffer_size;
     encode_param.enStrmBufType = AX_STREAM_BUF_NON_CACHE;
+#if !defined(AXSDK_CHIP_AX650)
+    encode_param.u32OutBufSize = stream_buffer_size;
+#endif
     encode_param.stJpegParam.u32Qfactor = std::clamp<std::uint32_t>(options.quality, 1U, 99U);
     encode_param.stJpegParam.bDblkEnable = AX_FALSE;
 
@@ -448,9 +450,9 @@ std::vector<std::uint8_t> EncodeJpegBytes(const common::AxImage& image,
         encoded.assign(encode_param.pu8Addr, encode_param.pu8Addr + encode_param.u32Len);
     } else if (encode_ret != AX_SUCCESS) {
         std::fprintf(stderr,
-                     "jpeg encode: AX_VENC_JpegEncodeOneFrame failed ret=0x%x width=%u height=%u fmt=%d stride0=%u stride1=%u out=%u\n",
+                     "jpeg encode: AX_VENC_JpegEncodeOneFrame failed ret=0x%x width=%u height=%u fmt=%d stride0=%u stride1=%u stream_buf=%u\n",
                      encode_ret, encode_param.u32Width, encode_param.u32Height, static_cast<int>(encode_param.enImgFormat),
-                     encode_param.u32PicStride[0], encode_param.u32PicStride[1], encode_param.u32OutBufSize);
+                     encode_param.u32PicStride[0], encode_param.u32PicStride[1], stream_buffer_size);
     }
 
     (void)AX_SYS_MemFree(stream_phy_addr, stream_vir_addr);
