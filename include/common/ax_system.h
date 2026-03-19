@@ -4,6 +4,12 @@
 
 namespace axvsdk::common {
 
+enum class BackendType {
+    kAuto = 0,
+    kAxMsp,
+    kAxcl,
+};
+
 enum class VdecModule {
     kBothVideoAndJpeg = 0,
     kVideoOnly = 1,
@@ -17,6 +23,9 @@ enum class VencType {
 };
 
 struct SystemOptions {
+    BackendType backend{BackendType::kAuto};
+    std::int32_t device_id{-1};
+
     bool enable_vdec{true};
     bool enable_venc{true};
     bool enable_ivps{true};
@@ -34,5 +43,7 @@ struct SystemOptions {
 bool InitializeSystem(const SystemOptions& options = {});
 void ShutdownSystem() noexcept;
 bool IsSystemInitialized() noexcept;
+BackendType GetActiveBackend() noexcept;
+std::int32_t GetActiveDeviceId() noexcept;
 
 }  // namespace axvsdk::common

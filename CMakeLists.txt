@@ -4,8 +4,9 @@ project(ax_video_sdk LANGUAGES CXX)
 
 find_package(Threads REQUIRED)
 
-set(AXSDK_CHIP_TYPE "" CACHE STRING "Target chip type: ax630c, ax620q, ax620qp, ax650")
+set(AXSDK_CHIP_TYPE "" CACHE STRING "Target chip type: ax630c, ax620q, ax620qp, ax650, axcl")
 set(AXSDK_MSP_DIR "" CACHE PATH "Path to target MSP root, for example /home/axera/msp_dir/ax620e/msp")
+set(AXSDK_AXCL_DIR "" CACHE PATH "Path to AXCL SDK root, for example /opt/axcl or /usr")
 option(AXSDK_BUILD_SHARED "Build SDK libraries as shared objects so consumers do not need MSP link flags" ON)
 option(AXSDK_BUILD_TOOLS "Build internal tools such as demux probes" OFF)
 option(AXSDK_BUILD_SMOKE_TESTS "Build internal smoke tests" OFF)
@@ -13,14 +14,56 @@ option(AXSDK_BUILD_SMOKE_TESTS "Build internal smoke tests" OFF)
 set(AXSDK_COMMON_LIBS "")
 set(AXSDK_MSP_INCLUDE_DIR "")
 set(AXSDK_MSP_LIB_DIR "")
+set(AXSDK_AX_RUNTIME_NAME "AX MSP")
 
-if(NOT AXSDK_CHIP_TYPE OR NOT AXSDK_MSP_DIR)
-    message(FATAL_ERROR "This project is AX-only. Set both AXSDK_CHIP_TYPE and AXSDK_MSP_DIR.")
+if(NOT AXSDK_CHIP_TYPE)
+    message(FATAL_ERROR "This project is AX-only. Set AXSDK_CHIP_TYPE.")
 endif()
 
 string(TOLOWER "${AXSDK_CHIP_TYPE}" AXSDK_CHIP_TYPE_NORMALIZED)
 
-if(AXSDK_CHIP_TYPE_NORMALIZED STREQUAL "ax630c")
+if(NOT AXSDK_CHIP_TYPE_NORMALIZED STREQUAL "axcl" AND NOT AXSDK_MSP_DIR)
+    message(FATAL_ERROR "Non-AXCL build requires AXSDK_MSP_DIR.")
+endif()
+
+if(AXSDK_CHIP_TYPE_NORMALIZED STREQUAL "axcl")
+    set(AXSDK_AXCL_HOST_ARCH "")
+    if(AXSDK_AXCL_DIR)
+        set(AXSDK_AXCL_ROOT "${AXSDK_AXCL_DIR}")
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+        set(AXSDK_AXCL_ROOT "/usr")
+        set(AXSDK_AXCL_HOST_ARCH "x86")
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+        set(AXSDK_AXCL_ROOT "/usr")
+        set(AXSDK_AXCL_HOST_ARCH "arm64")
+    endif()
+
+    if(NOT AXSDK_AXCL_ROOT)
+        message(FATAL_ERROR "AXCL build requires AXSDK_AXCL_DIR or a supported host architecture.")
+    endif()
+
+    if(EXISTS "${AXSDK_AXCL_ROOT}/include/axcl/axcl.h")
+        set(AXSDK_MSP_INCLUDE_DIR "${AXSDK_AXCL_ROOT}/include/axcl")
+    elseif(EXISTS "${AXSDK_AXCL_ROOT}/include/axcl.h")
+        set(AXSDK_MSP_INCLUDE_DIR "${AXSDK_AXCL_ROOT}/include")
+    else()
+        message(FATAL_ERROR "AXCL include directory not found under ${AXSDK_AXCL_ROOT}")
+    endif()
+
+    if(EXISTS "${AXSDK_AXCL_ROOT}/lib/axcl/libaxcl_sys.so")
+        set(AXSDK_MSP_LIB_DIR "${AXSDK_AXCL_ROOT}/lib/axcl")
+    elseif(EXISTS "${AXSDK_AXCL_ROOT}/lib/libaxcl_sys.so")
+        set(AXSDK_MSP_LIB_DIR "${AXSDK_AXCL_ROOT}/lib")
+    elseif(EXISTS "${AXSDK_AXCL_ROOT}/lib64/libaxcl_sys.so")
+        set(AXSDK_MSP_LIB_DIR "${AXSDK_AXCL_ROOT}/lib64")
+    else()
+        message(FATAL_ERROR "AXCL library directory not found under ${AXSDK_AXCL_ROOT}")
+    endif()
+
+    set(AXSDK_CHIP_DEFINE AXSDK_PLATFORM_AXCL=1)
+    set(AXSDK_COMMON_LIBS axcl_rt axcl_sys axcl_vdec axcl_venc axcl_ivps)
+    set(AXSDK_AX_RUNTIME_NAME "AXCL")
+elseif(AXSDK_CHIP_TYPE_NORMALIZED STREQUAL "ax630c")
     set(AXSDK_MSP_INCLUDE_DIR "${AXSDK_MSP_DIR}/out/arm64_glibc/include")
     set(AXSDK_MSP_LIB_DIR "${AXSDK_MSP_DIR}/out/arm64_glibc/lib")
     set(AXSDK_CHIP_DEFINE AXSDK_CHIP_AX620E_FAMILY=1)
@@ -47,7 +90,9 @@ if(NOT EXISTS "${AXSDK_MSP_LIB_DIR}")
     message(FATAL_ERROR "AX SDK library directory does not exist: ${AXSDK_MSP_LIB_DIR}")
 endif()
 
-set(AXSDK_COMMON_LIBS ax_sys ax_vdec ax_venc ax_ivps)
+if(NOT AXSDK_COMMON_LIBS)
+    set(AXSDK_COMMON_LIBS ax_sys ax_vdec ax_venc ax_ivps)
+endif()
 set(AXSDK_LIBRARY_TYPE STATIC)
 if(AXSDK_BUILD_SHARED)
     set(AXSDK_LIBRARY_TYPE SHARED)
@@ -77,7 +122,7 @@ target_compile_definitions(ax_video_sdk_ax_msp
         ${AXSDK_CHIP_DEFINE}
 )
 
-message(STATUS "AX SDK enabled for ${AXSDK_CHIP_TYPE_NORMALIZED}")
+message(STATUS "${AXSDK_AX_RUNTIME_NAME} enabled for ${AXSDK_CHIP_TYPE_NORMALIZED}")
 message(STATUS "AX SDK includes: ${AXSDK_MSP_INCLUDE_DIR}")
 message(STATUS "AX SDK libs: ${AXSDK_MSP_LIB_DIR}")
 
@@ -103,6 +148,14 @@ if(AXSDK_CHIP_TYPE_NORMALIZED STREQUAL "ax650")
             src/codec/ax_video_decoder_ax650.cpp
             src/codec/ax_video_encoder_ax650.cpp
             src/pipeline/ax_pipeline_osd_ax650.cpp
+    )
+elseif(AXSDK_CHIP_TYPE_NORMALIZED STREQUAL "axcl")
+    target_sources(ax_video_sdk
+        PRIVATE
+            src/common/ax_image_processor_axcl.cpp
+            src/codec/ax_video_decoder_axcl.cpp
+            src/codec/ax_video_encoder_axcl.cpp
+            src/pipeline/ax_pipeline_osd_axcl.cpp
     )
 else()
     target_sources(ax_video_sdk
@@ -140,6 +193,10 @@ target_link_libraries(ax_video_sdk
         rtsp-sdk
         ${AXSDK_COMMON_LIBS}
 )
+
+if(AXSDK_CHIP_TYPE_NORMALIZED STREQUAL "axcl" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_link_options(ax_video_sdk PRIVATE -Wl,--allow-shlib-undefined)
+endif()
 
 function(axsdk_configure_internal_tool target)
     set(options LINK_AX_MSP LINK_RTSP)

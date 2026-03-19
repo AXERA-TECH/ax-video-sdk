@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "ax_cmdline_utils.h"
-#include "codec/ax_mp4_demuxer.h"
+#include "ax_mp4_demuxer.h"
 #include "minimp4/minimp4.h"
 
 namespace {

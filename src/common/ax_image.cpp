@@ -1,5 +1,6 @@
 #include "common/ax_image.h"
 #include "ax_image_internal.h"
+#include "ax_system_internal.h"
 
 #include <algorithm>
 #include <array>
@@ -8,7 +9,21 @@
 #include <memory>
 #include <utility>
 
+#if defined(AXSDK_PLATFORM_AXCL)
+#include "axcl_sys.h"
+#include "axcl_rt_memory.h"
+#define AX_SYS_MemAlloc AXCL_SYS_MemAlloc
+#define AX_SYS_MemAllocCached AXCL_SYS_MemAllocCached
+#define AX_SYS_MemFree AXCL_SYS_MemFree
+#define AX_SYS_MflushCache AXCL_SYS_MflushCache
+#define AX_SYS_MinvalidateCache AXCL_SYS_MinvalidateCache
+#define AX_POOL_GetBlock AXCL_POOL_GetBlock
+#define AX_POOL_ReleaseBlock AXCL_POOL_ReleaseBlock
+#define AX_POOL_Handle2PhysAddr AXCL_POOL_Handle2PhysAddr
+#define AX_POOL_GetBlockVirAddr AXCL_POOL_GetBlockVirAddr
+#else
 #include "ax_sys_api.h"
+#endif
 
 namespace axvsdk::common {
 
@@ -192,6 +207,11 @@ struct AxImage::Impl {
     }
 
     bool AllocateFromCmm(const ImageAllocationOptions& options) {
+#if defined(AXSDK_PLATFORM_AXCL)
+        if (!internal::EnsureAxclThreadContext()) {
+            return false;
+        }
+#endif
         AX_U64 phy_addr = 0;
         AX_VOID* vir_addr = nullptr;
 
@@ -212,6 +232,11 @@ struct AxImage::Impl {
     }
 
     bool AllocateFromPool(const ImageAllocationOptions& options) {
+#if defined(AXSDK_PLATFORM_AXCL)
+        if (!internal::EnsureAxclThreadContext()) {
+            return false;
+        }
+#endif
         if (options.pool_id == kInvalidPoolId) {
             return false;
         }
@@ -241,6 +266,11 @@ struct AxImage::Impl {
     }
 
     void Release() noexcept {
+#if defined(AXSDK_PLATFORM_AXCL)
+        if (owns_memory) {
+            (void)internal::EnsureAxclThreadContext();
+        }
+#endif
         if (release_callback) {
             try {
                 release_callback(frame_info);
@@ -350,6 +380,11 @@ AxImage::Ptr AxImage::WrapExternal(const ImageDescriptor& descriptor,
 
 AxImage::Ptr internal::AxImageAccess::WrapVideoFrame(const AX_VIDEO_FRAME_INFO_T& frame_info,
                                                      FrameReleaseCallback release_callback) {
+#if defined(AXSDK_PLATFORM_AXCL)
+    if (!internal::EnsureAxclThreadContext()) {
+        return nullptr;
+    }
+#endif
     const auto format = FromAxFormat(frame_info.stVFrame.enImgFormat);
     if (format == PixelFormat::kUnknown || frame_info.stVFrame.u32Width == 0 || frame_info.stVFrame.u32Height == 0) {
         return nullptr;
@@ -500,10 +535,19 @@ void AxImage::Fill(std::uint8_t value) noexcept {
     if (impl_->virtual_addresses[0] == nullptr || impl_->total_size == 0) {
         return;
     }
+#if defined(AXSDK_PLATFORM_AXCL)
+    (void)axclrtMemset(impl_->virtual_addresses[0], value, impl_->total_size);
+#else
     std::memset(impl_->virtual_addresses[0], value, impl_->total_size);
+#endif
 }
 
 bool AxImage::FlushCache() noexcept {
+#if defined(AXSDK_PLATFORM_AXCL)
+    if (!internal::EnsureAxclThreadContext()) {
+        return false;
+    }
+#endif
     if (impl_->cache_mode != CacheMode::kCached || impl_->physical_addresses[0] == 0 ||
         impl_->virtual_addresses[0] == nullptr || impl_->total_size == 0) {
         return true;
@@ -514,6 +558,11 @@ bool AxImage::FlushCache() noexcept {
 }
 
 bool AxImage::InvalidateCache() noexcept {
+#if defined(AXSDK_PLATFORM_AXCL)
+    if (!internal::EnsureAxclThreadContext()) {
+        return false;
+    }
+#endif
     if (impl_->cache_mode != CacheMode::kCached || impl_->physical_addresses[0] == 0 ||
         impl_->virtual_addresses[0] == nullptr || impl_->total_size == 0) {
         return true;

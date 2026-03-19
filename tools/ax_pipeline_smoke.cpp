@@ -54,6 +54,7 @@ std::vector<std::string> SplitOutputUris(const std::string& value) {
 int Run(const char* input_path,
         const std::vector<std::string>& output_uris,
         codec::VideoCodecType output_codec,
+        int device_id,
         std::uint32_t output_width,
         std::uint32_t output_height,
         common::ResizeMode resize_mode,
@@ -61,6 +62,7 @@ int Run(const char* input_path,
         int expected_packets,
         int timeout_seconds) {
     common::SystemOptions system_options{};
+    system_options.device_id = device_id;
     system_options.enable_vdec = true;
     system_options.enable_venc = true;
     system_options.enable_ivps = true;
@@ -85,6 +87,7 @@ int Run(const char* input_path,
     std::atomic<int> key_count{0};
 
     pipeline::PipelineConfig config{};
+    config.device_id = device_id;
     config.input.uri = input_path;
     config.input.realtime_playback = false;
     config.input.loop_playback = loop_playback;
@@ -131,8 +134,12 @@ int Run(const char* input_path,
     }
 
     const auto stats = pipeline->GetStats();
+    std::cerr << "pipeline: stop begin\n";
     pipeline->Stop();
+    std::cerr << "pipeline: stop done\n";
+    std::cerr << "pipeline: close begin\n";
     pipeline->Close();
+    std::cerr << "pipeline: close done\n";
 
     const auto encoded_packets = stats.output_stats.empty() ? 0ULL : stats.output_stats.front().encoded_packets;
     const auto dropped_frames = stats.output_stats.empty() ? 0ULL : stats.output_stats.front().dropped_frames;
@@ -162,6 +169,7 @@ int main(int argc, char** argv) {
     parser.add<std::string>("input", 'i', "input URI/path", false, "");
     parser.add<std::string>("output", 'o', "output URI/path list, separated by commas", false, "");
     parser.add<std::string>("codec", 'c', "output codec: h264|h265", false, "h264");
+    parser.add<int>("device-id", 'd', "AXCL device id/index", false, -1);
     parser.add<int>("width", 'w', "output width", false, 0);
     parser.add<int>("height", 0, "output height", false, 0);
     parser.add("loop", 0, "loop MP4/file input");
@@ -177,6 +185,7 @@ int main(int argc, char** argv) {
     std::string input_uri;
     std::string output_uri_csv;
     std::string codec_name{"h264"};
+    int device_id = -1;
     int width = 0;
     int height = 0;
     const bool loop_playback = parser.exist("loop");
@@ -186,11 +195,12 @@ int main(int argc, char** argv) {
     if (!tooling::GetRequiredArgument(parser, "input", 0, "input", &input_uri, std::cerr) ||
         !tooling::GetRequiredArgument(parser, "output", 1, "output", &output_uri_csv, std::cerr) ||
         !tooling::GetOptionalArgument(parser, "codec", 2, std::string("h264"), &codec_name, std::cerr) ||
-        !tooling::GetOptionalArgument(parser, "width", 3, 0, &width, std::cerr) ||
-        !tooling::GetOptionalArgument(parser, "height", 4, 0, &height, std::cerr) ||
-        !tooling::GetOptionalArgument(parser, "expected-packets", 5, 10, &expected_packets, std::cerr) ||
-        !tooling::GetOptionalArgument(parser, "timeout", 6, 20, &timeout_seconds, std::cerr) ||
-        !tooling::GetOptionalArgument(parser, "resize", 7, std::string("stretch"), &resize_mode_name, std::cerr)) {
+        !tooling::GetOptionalArgument(parser, "device-id", 3, -1, &device_id, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "width", 4, 0, &width, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "height", 5, 0, &height, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "expected-packets", 6, 10, &expected_packets, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "timeout", 7, 20, &timeout_seconds, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "resize", 8, std::string("stretch"), &resize_mode_name, std::cerr)) {
         std::cerr << parser.usage();
         return 1;
     }
@@ -204,6 +214,7 @@ int main(int argc, char** argv) {
     return Run(input_uri.c_str(),
                output_uris,
                ParseCodec(codec_name.c_str()),
+               device_id,
                static_cast<std::uint32_t>(width),
                static_cast<std::uint32_t>(height),
                ParseResizeMode(resize_mode_name.c_str()),

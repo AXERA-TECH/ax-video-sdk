@@ -14,6 +14,7 @@ namespace axvsdk::codec {
 struct VideoDecoderConfig {
     VideoStreamInfo stream{};
     common::ImageDescriptor output_image{};
+    std::int32_t device_id{-1};
 };
 
 using FrameCallback = std::function<void(common::AxImage::Ptr frame)>;

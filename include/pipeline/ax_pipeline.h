@@ -122,6 +122,7 @@ struct PipelineOsdFrame {
 };
 
 struct PipelineConfig {
+    std::int32_t device_id{-1};
     PipelineInputConfig input{};
     std::vector<PipelineOutputConfig> outputs;
     PipelineFrameOutputConfig frame_output{};

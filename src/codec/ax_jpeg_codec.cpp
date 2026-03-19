@@ -14,9 +14,19 @@
 #include <vector>
 
 #include "ax_buffer_tool.h"
+#if defined(AXSDK_PLATFORM_AXCL)
+#include "axcl_sys.h"
+#include "axcl_vdec.h"
+#include "axcl_venc.h"
+#define AX_SYS_MemAlloc AXCL_SYS_MemAlloc
+#define AX_SYS_MemFree AXCL_SYS_MemFree
+#define AX_VDEC_JpegDecodeOneFrame AXCL_VDEC_JpegDecodeOneFrame
+#define AX_VENC_JpegEncodeOneFrame AXCL_VENC_JpegEncodeOneFrame
+#else
 #include "ax_sys_api.h"
 #include "ax_vdec_api.h"
 #include "ax_venc_api.h"
+#endif
 
 #include "ax_image_internal.h"
 #include "common/ax_image_processor.h"
@@ -438,7 +448,7 @@ std::vector<std::uint8_t> EncodeJpegBytes(const common::AxImage& image,
     encode_param.pu8Addr = static_cast<AX_U8*>(stream_vir_addr);
     encode_param.u32Len = stream_buffer_size;
     encode_param.enStrmBufType = AX_STREAM_BUF_NON_CACHE;
-#if !defined(AXSDK_CHIP_AX650)
+#if !defined(AXSDK_CHIP_AX650) && !defined(AXSDK_PLATFORM_AXCL)
     encode_param.u32OutBufSize = stream_buffer_size;
 #endif
     encode_param.stJpegParam.u32Qfactor = std::clamp<std::uint32_t>(options.quality, 1U, 99U);

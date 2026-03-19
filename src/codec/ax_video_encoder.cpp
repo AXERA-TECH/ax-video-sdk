@@ -3,10 +3,15 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <utility>
 
 #include "common/ax_image_processor.h"
 #include "common/ax_system.h"
+#include "ax_image_copy.h"
+#if defined(AXSDK_PLATFORM_AXCL)
+#include "ax_system_internal.h"
+#endif
 
 namespace axvsdk::codec {
 
@@ -44,6 +49,7 @@ ResolvedVideoEncoderConfig ResolveConfig(const VideoEncoderConfig& config) noexc
     resolved.codec = config.codec;
     resolved.width = config.width;
     resolved.height = config.height;
+    resolved.device_id = config.device_id;
     resolved.max_width = config.width;
     resolved.max_height = config.height;
     resolved.src_frame_rate = config.frame_rate > 0.0 ? config.frame_rate : 30.0;
@@ -140,6 +146,10 @@ void AxVideoEncoderBase::Stop() noexcept {
     }
 
     stop_requested_ = true;
+    {
+        std::lock_guard<std::mutex> lock(input_mutex_);
+        pending_frames_.clear();
+    }
     input_cv_.notify_all();
 
     if (send_thread_.joinable()) {
@@ -152,10 +162,6 @@ void AxVideoEncoderBase::Stop() noexcept {
         stream_thread_.join();
     }
 
-    {
-        std::lock_guard<std::mutex> lock(input_mutex_);
-        pending_frames_.clear();
-    }
     {
         std::lock_guard<std::mutex> lock(staging_mutex_);
         reusable_frames_.clear();
@@ -234,6 +240,10 @@ const ResolvedVideoEncoderConfig& AxVideoEncoderBase::config() const noexcept {
     return config_;
 }
 
+bool AxVideoEncoderBase::stop_requested() const noexcept {
+    return stop_requested_.load(std::memory_order_relaxed);
+}
+
 bool AxVideoEncoderBase::ValidateInputFrame(const common::AxImage& frame) const noexcept {
     return frame.width() != 0 && frame.height() != 0;
 }
@@ -281,13 +291,17 @@ void AxVideoEncoderBase::ReleaseOldInflightFrame() {
 }
 
 PreparedInputFrame AxVideoEncoderBase::PrepareInputFrame(const common::AxImage& frame) {
+#if defined(AXSDK_PLATFORM_AXCL)
+    if (!common::internal::EnsureAxclThreadContext(config_.device_id)) {
+        return {};
+    }
+#endif
     const auto target_stride = static_cast<std::size_t>(config_.width);
     const bool already_hw_ready =
         frame.format() == common::PixelFormat::kNv12 &&
         frame.width() == config_.width &&
         frame.height() == config_.height &&
         frame.physical_address(0) != 0 &&
-        frame.virtual_address(0) != nullptr &&
         frame.stride(0) >= target_stride &&
         frame.stride(1) >= target_stride;
     if (already_hw_ready) {
@@ -305,11 +319,9 @@ PreparedInputFrame AxVideoEncoderBase::PrepareInputFrame(const common::AxImage& 
                                   frame.height() != target.height || frame.physical_address(0) == 0;
     if (!needs_processing) {
         auto output = AcquireReusableFrame(target, "VideoEncoderInput");
-        if (!output || frame.virtual_address(0) == nullptr || frame.virtual_address(1) == nullptr) {
+        if (!output || !common::internal::CopyImage(frame, output.get())) {
             return {};
         }
-        std::memcpy(output->virtual_address(0), frame.virtual_address(0), std::min(output->plane_size(0), frame.plane_size(0)));
-        std::memcpy(output->virtual_address(1), frame.virtual_address(1), std::min(output->plane_size(1), frame.plane_size(1)));
         return {std::move(output), true};
     }
 
@@ -322,17 +334,9 @@ PreparedInputFrame AxVideoEncoderBase::PrepareInputFrame(const common::AxImage& 
     bool source_reusable = false;
     if (frame.physical_address(0) == 0) {
         source = AcquireReusableFrame(frame.descriptor(), "VideoEncoderSource");
-        if (!source || frame.virtual_address(0) == nullptr) {
+        if (!source || !common::internal::CopyImage(frame, source.get())) {
             return {};
         }
-        for (std::size_t plane = 0; plane < frame.plane_count(); ++plane) {
-            if (source->virtual_address(plane) == nullptr || frame.virtual_address(plane) == nullptr) {
-                return {};
-            }
-            std::memcpy(source->virtual_address(plane), frame.virtual_address(plane),
-                        std::min(source->plane_size(plane), frame.plane_size(plane)));
-        }
-        (void)source->FlushCache();
         source_reusable = true;
     } else {
         (void)source->FlushCache();
@@ -359,7 +363,8 @@ void AxVideoEncoderBase::SendLoop() {
         {
             std::unique_lock<std::mutex> lock(input_mutex_);
             input_cv_.wait(lock, [this] { return stop_requested_ || !pending_frames_.empty(); });
-            if (stop_requested_ && pending_frames_.empty()) {
+            if (stop_requested_) {
+                pending_frames_.clear();
                 return;
             }
 

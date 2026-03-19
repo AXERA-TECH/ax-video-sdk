@@ -47,6 +47,22 @@ jobs:
             toolchain_url: https://github.com/AXERA-TECH/ax620q_bsp_sdk/releases/download/v2.0.0/arm-AX620E-linux-uclibcgnueabihf_V3_20240320.tgz
             toolchain_archive: arm-AX620E-linux-uclibcgnueabihf_V3_20240320.tgz
             toolchain_root: arm-AX620E-linux-uclibcgnueabihf
+          - chip: axcl-x86_64
+            script: ./build_axcl_x86.sh
+            msp_zip: axcl_linux_3.10.2.zip
+            msp_url: https://github.com/ZHEQIUSHUI/assets/releases/download/ax_3.6.2/axcl_linux_3.10.2.zip
+            toolchain_pkg: unzip
+            toolchain_url: ""
+            toolchain_archive: ""
+            toolchain_root: ""
+          - chip: axcl-aarch64
+            script: ./build_axcl_aarch64.sh
+            msp_zip: axcl_linux_3.10.2.zip
+            msp_url: https://github.com/ZHEQIUSHUI/assets/releases/download/ax_3.6.2/axcl_linux_3.10.2.zip
+            toolchain_pkg: unzip xz-utils
+            toolchain_url: https://developer.arm.com/-/media/Files/downloads/gnu-a/9.2-2019.12/binrel/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu.tar.xz
+            toolchain_archive: gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu.tar.xz
+            toolchain_root: gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu
 
     steps:
       - uses: actions/checkout@v4
@@ -109,7 +125,7 @@ jobs:
           AXSDK_MSP_ZIP_PATH: ${{ github.workspace }}/.ci/downloads/${{ matrix.msp_zip }}
           AXSDK_TOOLCHAIN_BIN: ${{ github.workspace }}/.ci/toolchains/${{ matrix.toolchain_root }}/bin
         run: |
-          chmod +x ./build_ax650.sh ./build_ax630c.sh ./build_ax620q.sh ./build_ax620qp.sh ./scripts/build_common.sh
+          chmod +x ./build_ax650.sh ./build_ax630c.sh ./build_ax620q.sh ./build_ax620qp.sh ./build_axcl_x86.sh ./build_axcl_aarch64.sh ./scripts/build_common.sh
           ${{ matrix.script }}
 
       - name: Upload Artifact

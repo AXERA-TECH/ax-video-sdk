@@ -13,7 +13,7 @@
 
 #include <rtsp-client/rtsp_client.h>
 
-#include "codec/ax_mp4_demuxer.h"
+#include "ax_mp4_demuxer.h"
 #include "ax_rtsp_internal.h"
 
 namespace axvsdk::pipeline {

@@ -2,12 +2,20 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <thread>
 #include <utility>
 
 #include "ax_image_copy.h"
 #include "ax_image_internal.h"
+#if defined(AXSDK_PLATFORM_AXCL)
+#include "axcl_sys.h"
+#define AX_POOL_IncreaseRefCnt AXCL_POOL_IncreaseRefCnt
+#define AX_POOL_DecreaseRefCnt AXCL_POOL_DecreaseRefCnt
+#include "ax_system_internal.h"
+#else
 #include "ax_sys_api.h"
+#endif
 
 #include "common/ax_system.h"
 
@@ -322,11 +330,22 @@ void AxVideoDecoderBase::PublishFrame(const AX_VIDEO_FRAME_INFO_T& frame_info) {
     common::AxImage::Ptr published_frame;
     const auto block_id = frame_info.stVFrame.u32BlkId[0];
     if (block_id != AX_INVALID_BLOCKID) {
+#if defined(AXSDK_PLATFORM_AXCL)
+        if (!common::internal::EnsureAxclThreadContext()) {
+            ReleaseDecodedFrame(frame_info);
+            return;
+        }
+#endif
         const auto ref_ret = AX_POOL_IncreaseRefCnt(block_id);
         if (ref_ret == AX_SUCCESS) {
             published_frame = common::internal::AxImageAccess::WrapVideoFrame(
                 frame_info, [](const AX_VIDEO_FRAME_INFO_T& retained_frame) {
                     if (retained_frame.stVFrame.u32BlkId[0] != AX_INVALID_BLOCKID) {
+#if defined(AXSDK_PLATFORM_AXCL)
+                        if (!common::internal::EnsureAxclThreadContext()) {
+                            return;
+                        }
+#endif
                         (void)AX_POOL_DecreaseRefCnt(retained_frame.stVFrame.u32BlkId[0]);
                     }
                 });

@@ -30,6 +30,7 @@ struct VideoEncoderConfig {
     VideoCodecType codec{VideoCodecType::kUnknown};
     std::uint32_t width{0};
     std::uint32_t height{0};
+    std::int32_t device_id{-1};
     double frame_rate{0.0};
     std::uint32_t bitrate_kbps{0};
     std::uint32_t gop{0};

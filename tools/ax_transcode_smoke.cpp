@@ -32,6 +32,7 @@ codec::VideoCodecType ParseCodec(const char* value) {
 int Run(const char* input_path,
         const char* output_path,
         codec::VideoCodecType output_codec,
+        int device_id,
         int expected_decoded_frames,
         int timeout_seconds) {
     auto demuxer = tooling::OpenDemuxer(input_path, false);
@@ -42,6 +43,7 @@ int Run(const char* input_path,
 
     const auto video_info = demuxer->GetVideoStreamInfo();
     common::SystemOptions system_options{};
+    system_options.device_id = device_id;
     system_options.enable_vdec = true;
     system_options.enable_venc = true;
     system_options.enable_ivps = false;
@@ -64,7 +66,8 @@ int Run(const char* input_path,
         return 4;
     }
 
-    const auto decoder_config = tooling::MakeDecoderConfigFromStreamInfo(video_info);
+    auto decoder_config = tooling::MakeDecoderConfigFromStreamInfo(video_info);
+    decoder_config.device_id = device_id;
     if (!decoder->Open(decoder_config)) {
         std::cerr << "decoder Open failed\n";
         return 5;
@@ -74,6 +77,7 @@ int Run(const char* input_path,
     encoder_config.codec = output_codec;
     encoder_config.width = video_info.width;
     encoder_config.height = video_info.height;
+    encoder_config.device_id = device_id;
     encoder_config.frame_rate = video_info.frame_rate > 0.0 ? video_info.frame_rate : 30.0;
     encoder_config.gop = static_cast<std::uint32_t>(encoder_config.frame_rate > 1.0 ? encoder_config.frame_rate
                                                                                     : 30.0);
@@ -198,16 +202,28 @@ int Run(const char* input_path,
     }
 
     stop_feed.store(true, std::memory_order_relaxed);
+    std::cerr << "transcode: decoder stop begin\n";
     decoder->Stop();
+    std::cerr << "transcode: decoder stop done\n";
     if (feed_thread.joinable()) {
+        std::cerr << "transcode: feed join begin\n";
         feed_thread.join();
+        std::cerr << "transcode: feed join done\n";
     }
-    decoder->Close();
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::cerr << "transcode: encoder stop begin\n";
     encoder->Stop();
+    std::cerr << "transcode: encoder stop done\n";
+    std::cerr << "transcode: encoder close begin\n";
     encoder->Close();
+    std::cerr << "transcode: encoder close done\n";
+    std::cerr << "transcode: decoder close begin\n";
+    decoder->Close();
+    std::cerr << "transcode: decoder close done\n";
     if (muxer) {
+        std::cerr << "transcode: muxer close begin\n";
         muxer->Close();
+        std::cerr << "transcode: muxer close done\n";
     }
 
     const auto decoded = decoded_frames.load(std::memory_order_relaxed);
@@ -241,6 +257,7 @@ int main(int argc, char** argv) {
     parser.add<std::string>("input", 'i', "input MP4 path", false, "");
     parser.add<std::string>("output", 'o', "output URI/path", false, "");
     parser.add<std::string>("codec", 'c', "output codec: h264|h265", false, "h264");
+    parser.add<int>("device-id", 'd', "AXCL device id/index", false, -1);
     parser.add<int>("expected-frames", 'n', "expected decoded frames", false, 10);
     parser.add<int>("timeout", 't', "timeout seconds", false, 20);
 
@@ -252,13 +269,15 @@ int main(int argc, char** argv) {
     std::string input_path;
     std::string output_uri;
     std::string codec_name{"h264"};
+    int device_id = -1;
     int expected_decoded_frames = 10;
     int timeout_seconds = 20;
     if (!tooling::GetRequiredArgument(parser, "input", 0, "input", &input_path, std::cerr) ||
         !tooling::GetRequiredArgument(parser, "output", 1, "output", &output_uri, std::cerr) ||
         !tooling::GetOptionalArgument(parser, "codec", 2, std::string("h264"), &codec_name, std::cerr) ||
-        !tooling::GetOptionalArgument(parser, "expected-frames", 3, 10, &expected_decoded_frames, std::cerr) ||
-        !tooling::GetOptionalArgument(parser, "timeout", 4, 20, &timeout_seconds, std::cerr)) {
+        !tooling::GetOptionalArgument(parser, "device-id", 3, -1, &device_id, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "expected-frames", 4, 10, &expected_decoded_frames, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "timeout", 5, 20, &timeout_seconds, std::cerr)) {
         std::cerr << parser.usage();
         return 1;
     }
@@ -266,6 +285,7 @@ int main(int argc, char** argv) {
     return Run(input_path.c_str(),
                output_uri.c_str(),
                ParseCodec(codec_name.c_str()),
+               device_id,
                expected_decoded_frames,
                timeout_seconds);
 }

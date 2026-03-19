@@ -70,6 +70,7 @@ std::string MakeName(int index) {
 }
 
 pipeline::PipelineConfig MakeConfig(const std::string& input_path,
+                                    int device_id,
                                     codec::VideoCodecType codec,
                                     std::uint32_t width,
                                     std::uint32_t height,
@@ -77,6 +78,7 @@ pipeline::PipelineConfig MakeConfig(const std::string& input_path,
                                     FrameCopyMode frame_copy_mode,
                                     ChannelCounters* counters) {
     pipeline::PipelineConfig config{};
+    config.device_id = device_id;
     config.input.uri = input_path;
     config.input.realtime_playback = false;
     config.input.loop_playback = loop_playback;
@@ -102,6 +104,8 @@ pipeline::PipelineConfig MakeConfig(const std::string& input_path,
 
 int Run(const char* input_path,
         int channel_count,
+        int start_device_id,
+        int device_count,
         codec::VideoCodecType output_codec,
         std::uint32_t output_width,
         std::uint32_t output_height,
@@ -114,21 +118,36 @@ int Run(const char* input_path,
         std::cerr << "invalid channel_count\n";
         return 2;
     }
+    if (device_count <= 0) {
+        std::cerr << "invalid device_count\n";
+        return 2;
+    }
 
-    common::SystemOptions system_options{};
-    system_options.enable_vdec = true;
-    system_options.enable_venc = true;
-    system_options.enable_ivps = (output_width != 0U && output_height != 0U);
-    if (!common::InitializeSystem(system_options)) {
-        std::cerr << "InitializeSystem failed\n";
-        return 3;
+    int initialized_device_count = 0;
+    for (int device_offset = 0; device_offset < device_count; ++device_offset) {
+        common::SystemOptions system_options{};
+        system_options.device_id = start_device_id + device_offset;
+        system_options.enable_vdec = true;
+        system_options.enable_venc = true;
+        system_options.enable_ivps = (output_width != 0U && output_height != 0U);
+        if (!common::InitializeSystem(system_options)) {
+            std::cerr << "InitializeSystem failed at device_index=" << (start_device_id + device_offset) << "\n";
+            while (initialized_device_count-- > 0) {
+                common::ShutdownSystem();
+            }
+            return 3;
+        }
+        ++initialized_device_count;
     }
 
     struct Guard {
+        int count{0};
         ~Guard() {
-            common::ShutdownSystem();
+            for (int index = 0; index < count; ++index) {
+                common::ShutdownSystem();
+            }
         }
-    } guard;
+    } guard{initialized_device_count};
 
     auto manager = pipeline::CreatePipelineManager();
     if (!manager) {
@@ -146,8 +165,16 @@ int Run(const char* input_path,
     for (int index = 0; index < channel_count; ++index) {
         auto channel_counters = std::make_unique<ChannelCounters>();
         const auto name = MakeName(index);
+        const int device_id = start_device_id + (index % device_count);
         const auto config = MakeConfig(
-            input_path, output_codec, output_width, output_height, loop_playback, frame_copy_mode, channel_counters.get());
+            input_path,
+            device_id,
+            output_codec,
+            output_width,
+            output_height,
+            loop_playback,
+            frame_copy_mode,
+            channel_counters.get());
         if (!manager->AddPipeline(name, config)) {
             manager->Clear();
             std::cerr << "AddPipeline failed at " << name << "\n";
@@ -305,6 +332,8 @@ int Run(const char* input_path,
     std::uint64_t total_poll_frames = 0;
 
     std::cout << "channel_count=" << channel_count << "\n";
+    std::cout << "start_device_id=" << start_device_id << "\n";
+    std::cout << "device_count=" << device_count << "\n";
     std::cout << "successful_channels=" << successful_channels << "\n";
     std::cout << "elapsed_ms=" << elapsed_ms << "\n";
     std::cout << "total_decoded_frames=" << total_decoded_frames << "\n";
@@ -340,6 +369,8 @@ int main(int argc, char** argv) {
     parser.set_program_name("ax_pipeline_stress_smoke");
     parser.add<std::string>("input", 'i', "input MP4 path", false, "");
     parser.add<int>("channels", 'c', "channel count", false, 16);
+    parser.add<int>("device-id", 'd', "start device index", false, 0);
+    parser.add<int>("device-count", 0, "number of devices used for round-robin assignment", false, 1);
     parser.add<std::string>("codec", 'x', "output codec: h264|h265", false, "h264");
     parser.add<int>("width", 'w', "output width", false, 0);
     parser.add<int>("height", 0, "output height", false, 0);
@@ -356,6 +387,8 @@ int main(int argc, char** argv) {
 
     std::string input_path;
     int channel_count = 16;
+    int start_device_id = 0;
+    int device_count = 1;
     std::string codec_name{"h264"};
     int output_width = 0;
     int output_height = 0;
@@ -366,19 +399,23 @@ int main(int argc, char** argv) {
     int timeout_seconds = 30;
     if (!tooling::GetRequiredArgument(parser, "input", 0, "input", &input_path, std::cerr) ||
         !tooling::GetOptionalArgument(parser, "channels", 1, 16, &channel_count, std::cerr) ||
-        !tooling::GetOptionalArgument(parser, "codec", 2, std::string("h264"), &codec_name, std::cerr) ||
-        !tooling::GetOptionalArgument(parser, "width", 3, 0, &output_width, std::cerr) ||
-        !tooling::GetOptionalArgument(parser, "height", 4, 0, &output_height, std::cerr) ||
-        !tooling::GetOptionalArgument(parser, "frame-copy-mode", 5, std::string("none"), &frame_copy_mode_name, std::cerr) ||
-        !tooling::GetOptionalArgument(parser, "frame-copy-interval", 6, 33, &frame_copy_interval_ms, std::cerr) ||
-        !tooling::GetOptionalArgument(parser, "expected-packets", 7, 10, &expected_packets_per_channel, std::cerr) ||
-        !tooling::GetOptionalArgument(parser, "timeout", 8, 30, &timeout_seconds, std::cerr)) {
+        !tooling::GetOptionalArgument(parser, "device-id", 2, 0, &start_device_id, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "device-count", 3, 1, &device_count, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "codec", 4, std::string("h264"), &codec_name, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "width", 5, 0, &output_width, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "height", 6, 0, &output_height, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "frame-copy-mode", 7, std::string("none"), &frame_copy_mode_name, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "frame-copy-interval", 8, 33, &frame_copy_interval_ms, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "expected-packets", 9, 10, &expected_packets_per_channel, std::cerr) ||
+        !tooling::GetOptionalArgument(parser, "timeout", 10, 30, &timeout_seconds, std::cerr)) {
         std::cerr << parser.usage();
         return 1;
     }
 
     return Run(input_path.c_str(),
                channel_count,
+               start_device_id,
+               device_count,
                ParseCodec(codec_name.c_str()),
                static_cast<std::uint32_t>(output_width),
                static_cast<std::uint32_t>(output_height),

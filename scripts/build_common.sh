@@ -46,6 +46,28 @@ case "${CHIP}" in
         DEFAULT_TOOLCHAIN_BIN="${ROOT_DIR}/.ci/toolchains/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin"
         COMPILER_CHECK="arm-linux-gnueabihf-g++"
         ;;
+    axcl-x86_64)
+        MSP_ZIP_NAME="axcl_linux_3.10.2.zip"
+        MSP_ZIP_DEFAULT="${ROOT_DIR}/.ci/downloads/${MSP_ZIP_NAME}"
+        MSP_EXTRACT_DIR="${ROOT_DIR}/.ci/axcl/axcl_linux_3.10.2_x86_64"
+        MSP_ROOT=""
+        TOOLCHAIN_FILE=""
+        DEFAULT_TOOLCHAIN_BIN=""
+        COMPILER_CHECK="g++"
+        AXCL_ARCH="x86_64"
+        AXCL_SUBDIR_NAME="axcl_linux_x86"
+        ;;
+    axcl-aarch64)
+        MSP_ZIP_NAME="axcl_linux_3.10.2.zip"
+        MSP_ZIP_DEFAULT="${ROOT_DIR}/.ci/downloads/${MSP_ZIP_NAME}"
+        MSP_EXTRACT_DIR="${ROOT_DIR}/.ci/axcl/axcl_linux_3.10.2_aarch64"
+        MSP_ROOT=""
+        TOOLCHAIN_FILE="${ROOT_DIR}/toolchains/aarch64-none-linux-gnu.toolchain.cmake"
+        DEFAULT_TOOLCHAIN_BIN="${ROOT_DIR}/.ci/toolchains/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu/bin"
+        COMPILER_CHECK="aarch64-none-linux-gnu-g++"
+        AXCL_ARCH="aarch64"
+        AXCL_SUBDIR_NAME="axcl_linux_arm64"
+        ;;
     *)
         echo "unsupported chip: ${CHIP}" >&2
         exit 1
@@ -58,11 +80,6 @@ BUILD_DIR="${AXSDK_BUILD_DIR:-${ROOT_DIR}/build_${CHIP}_ci}"
 STAGE_DIR="${AXSDK_STAGE_DIR:-${ROOT_DIR}/artifacts/${CHIP}}"
 PACKAGE_BASENAME="ax_video_sdk_${CHIP}"
 PACKAGE_DIR="${STAGE_DIR}/${PACKAGE_BASENAME}"
-
-if [[ ! -f "${MSP_ZIP_PATH}" ]]; then
-    echo "missing MSP zip: ${MSP_ZIP_PATH}" >&2
-    exit 1
-fi
 
 if [[ -d "${TOOLCHAIN_BIN}" ]]; then
     export PATH="${TOOLCHAIN_BIN}:${PATH}"
@@ -78,14 +95,58 @@ fi
     exit 1
 }
 
-mkdir -p "${MSP_EXTRACT_DIR}"
-if [[ ! -d "${MSP_ROOT}" ]]; then
-    rm -rf "${MSP_EXTRACT_DIR}"
-    mkdir -p "${MSP_EXTRACT_DIR}"
-    unzip -q "${MSP_ZIP_PATH}" -d "${MSP_EXTRACT_DIR}"
-fi
+if [[ "${CHIP}" == axcl-* ]]; then
+    if [[ -n "${AXSDK_AXCL_DIR:-}" ]]; then
+        MSP_ROOT="${AXSDK_AXCL_DIR}"
+    else
+        if [[ -f "${MSP_ZIP_PATH}" ]]; then
+            mkdir -p "${MSP_EXTRACT_DIR}"
+            if [[ ! -d "${MSP_EXTRACT_DIR}/${AXCL_SUBDIR_NAME}" ]]; then
+                rm -rf "${MSP_EXTRACT_DIR}"
+                mkdir -p "${MSP_EXTRACT_DIR}"
+                unzip -q "${MSP_ZIP_PATH}" -d "${MSP_EXTRACT_DIR}"
+            fi
 
-if [[ ! -d "${MSP_ROOT}" ]]; then
+            if [[ -d "${MSP_EXTRACT_DIR}/${AXCL_SUBDIR_NAME}" ]]; then
+                MSP_ROOT="${MSP_EXTRACT_DIR}/${AXCL_SUBDIR_NAME}"
+            else
+                DETECTED_AXCL_ROOT="$(find "${MSP_EXTRACT_DIR}" -maxdepth 4 \( -path "*/${AXCL_SUBDIR_NAME}/include/axcl.h" -o -path "*/${AXCL_SUBDIR_NAME}/include/axcl/axcl.h" \) | head -n 1 || true)"
+                if [[ "${DETECTED_AXCL_ROOT}" == */include/axcl/axcl.h ]]; then
+                    MSP_ROOT="${DETECTED_AXCL_ROOT%/include/axcl/axcl.h}"
+                elif [[ "${DETECTED_AXCL_ROOT}" == */include/axcl.h ]]; then
+                    MSP_ROOT="${DETECTED_AXCL_ROOT%/include/axcl.h}"
+                fi
+            fi
+        fi
+
+        if [[ -z "${MSP_ROOT}" && -f "/usr/include/axcl/axcl.h" && -d "/usr/lib/axcl" ]]; then
+            MSP_ROOT="/usr"
+        elif [[ -z "${MSP_ROOT}" && -f "/usr/include/axcl.h" && ( -d "/usr/lib" || -d "/usr/lib64" ) ]]; then
+            MSP_ROOT="/usr"
+        fi
+    fi
+
+    if [[ -z "${MSP_ROOT}" || ! -d "${MSP_ROOT}" ]]; then
+        echo "AXCL root not found for ${CHIP}; set AXSDK_AXCL_DIR, provide ${MSP_ZIP_PATH}, or install AXCL under /usr" >&2
+        exit 1
+    fi
+else
+    if [[ ! -f "${MSP_ZIP_PATH}" ]]; then
+        echo "missing MSP zip: ${MSP_ZIP_PATH}" >&2
+        exit 1
+    fi
+
+    mkdir -p "${MSP_EXTRACT_DIR}"
+    DETECTED_EXTRACT_MARKER=""
+    if [[ -d "${MSP_ROOT}" ]]; then
+        DETECTED_EXTRACT_MARKER="$(find "${MSP_ROOT}" -maxdepth 3 -type d -name msp 2>/dev/null | head -n 1 || true)"
+    fi
+    if [[ ! -d "${MSP_ROOT}" || -z "${DETECTED_EXTRACT_MARKER}" ]]; then
+        rm -rf "${MSP_EXTRACT_DIR}"
+        mkdir -p "${MSP_EXTRACT_DIR}"
+        unzip -q "${MSP_ZIP_PATH}" -d "${MSP_EXTRACT_DIR}"
+    fi
+
     DETECTED_MSP_ROOT="$(find "${MSP_EXTRACT_DIR}" -maxdepth 3 -type d -name msp | head -n 1 || true)"
     if [[ -n "${DETECTED_MSP_ROOT}" ]]; then
         MSP_ROOT="${DETECTED_MSP_ROOT}"
@@ -96,13 +157,33 @@ if [[ ! -d "${MSP_ROOT}" ]]; then
 fi
 
 rm -rf "${BUILD_DIR}"
-cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" \
-    -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}" \
-    -DAXSDK_CHIP_TYPE="${CHIP}" \
-    -DAXSDK_MSP_DIR="${MSP_ROOT}" \
-    -DAXSDK_BUILD_SHARED=ON \
-    -DAXSDK_BUILD_TOOLS=OFF \
-    -DAXSDK_BUILD_SMOKE_TESTS=OFF
+if [[ "${CHIP}" == axcl-* ]]; then
+    CMAKE_ARGS=(
+        -S "${ROOT_DIR}"
+        -B "${BUILD_DIR}"
+        -DAXSDK_CHIP_TYPE="axcl"
+        -DAXSDK_AXCL_DIR="${MSP_ROOT}"
+        -DAXSDK_BUILD_SHARED=ON
+        -DAXSDK_BUILD_TOOLS=OFF
+        -DAXSDK_BUILD_SMOKE_TESTS=OFF
+    )
+    if [[ -n "${TOOLCHAIN_FILE}" ]]; then
+        CMAKE_ARGS+=(-DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}")
+    fi
+else
+    CMAKE_ARGS=(
+        -S "${ROOT_DIR}"
+        -B "${BUILD_DIR}"
+        -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}"
+        -DAXSDK_CHIP_TYPE="${CHIP}"
+        -DAXSDK_MSP_DIR="${MSP_ROOT}"
+        -DAXSDK_BUILD_SHARED=ON
+        -DAXSDK_BUILD_TOOLS=OFF
+        -DAXSDK_BUILD_SMOKE_TESTS=OFF
+    )
+fi
+
+cmake "${CMAKE_ARGS[@]}"
 
 cmake --build "${BUILD_DIR}" -j"$(getconf _NPROCESSORS_ONLN)"
 

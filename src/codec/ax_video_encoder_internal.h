@@ -15,6 +15,7 @@ struct ResolvedVideoEncoderConfig {
     VideoCodecType codec{VideoCodecType::kUnknown};
     std::uint32_t width{0};
     std::uint32_t height{0};
+    std::int32_t device_id{-1};
     std::uint32_t max_width{0};
     std::uint32_t max_height{0};
     double src_frame_rate{30.0};
@@ -56,6 +57,7 @@ protected:
     const ResolvedVideoEncoderConfig& config() const noexcept;
     bool ValidateInputFrame(const common::AxImage& frame) const noexcept;
     PreparedInputFrame PrepareInputFrame(const common::AxImage& frame);
+    bool stop_requested() const noexcept;
 
 private:
     common::AxImage::Ptr AcquireReusableFrame(const common::ImageDescriptor& descriptor, const char* token);

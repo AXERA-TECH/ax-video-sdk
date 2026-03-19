@@ -173,6 +173,7 @@ public:
 
         codec::VideoDecoderConfig decoder_config{};
         decoder_config.stream = input_stream;
+        decoder_config.device_id = config.device_id;
         if (!decoder->Open(decoder_config)) {
             return false;
         }
@@ -197,6 +198,7 @@ public:
             encoder_config.codec = output.codec;
             encoder_config.width = output.width == 0 ? input_stream.width : output.width;
             encoder_config.height = output.height == 0 ? input_stream.height : output.height;
+            encoder_config.device_id = config.device_id;
             encoder_config.frame_rate = output.frame_rate > 0.0 ? output.frame_rate : input_frame_rate;
             encoder_config.bitrate_kbps = output.bitrate_kbps;
             encoder_config.gop = output.gop;

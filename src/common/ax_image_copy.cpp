@@ -4,9 +4,18 @@
 #include <cstdint>
 #include <cstring>
 
+#if defined(AXSDK_PLATFORM_AXCL)
+#include "axcl_ivps.h"
+#include "axcl_rt_memory.h"
+#define AX_IVPS_CmmCopyVpp AXCL_IVPS_CmmCopyVpp
+#define AX_IVPS_CscVpp AXCL_IVPS_CscVpp
+#else
 #include "ax_ivps_api.h"
-#include "ax_image_internal.h"
 #include "ax_sys_api.h"
+#endif
+
+#include "ax_image_internal.h"
+#include "ax_system_internal.h"
 
 namespace axvsdk::common::internal {
 
@@ -70,7 +79,7 @@ bool CopyPlaneByIvps(AX_U64 src_phy_addr,
                      std::size_t dst_stride,
                      std::size_t rows,
                      std::size_t row_bytes) noexcept {
-#if defined(AXSDK_CHIP_AX650)
+#if defined(AXSDK_CHIP_AX650) || defined(AXSDK_PLATFORM_AXCL)
     if (src_phy_addr == 0 || dst_phy_addr == 0 || rows == 0 || row_bytes == 0 ||
         src_stride < row_bytes || dst_stride < row_bytes) {
         return false;
@@ -103,7 +112,7 @@ bool CopyPlaneByIvps(AX_U64 src_phy_addr,
 }
 
 bool CopyFrameByCsc(const AX_VIDEO_FRAME_T& source_frame, AxImage* destination) noexcept {
-#if defined(AXSDK_CHIP_AX650)
+#if defined(AXSDK_CHIP_AX650) || defined(AXSDK_PLATFORM_AXCL)
     if (destination == nullptr) {
         return false;
     }
@@ -123,7 +132,7 @@ bool CopyFrameByCsc(const AX_VIDEO_FRAME_T& source_frame, AxImage* destination) 
 }
 
 bool CopyFrameByCmm(const AX_VIDEO_FRAME_T& source_frame, AxImage* destination) noexcept {
-#if defined(AXSDK_CHIP_AX650)
+#if defined(AXSDK_CHIP_AX650) || defined(AXSDK_PLATFORM_AXCL)
     if (destination == nullptr || source_frame.u64PhyAddr[0] == 0 || destination->physical_address(0) == 0 ||
         destination->byte_size() == 0) {
         return false;
@@ -138,6 +147,44 @@ bool CopyFrameByCmm(const AX_VIDEO_FRAME_T& source_frame, AxImage* destination) 
     return false;
 #endif
 }
+
+#if defined(AXSDK_PLATFORM_AXCL)
+bool CopyPlaneByRuntime(const void* src,
+                        std::size_t src_stride,
+                        bool src_is_device,
+                        void* dst,
+                        std::size_t dst_stride,
+                        bool dst_is_device,
+                        std::size_t rows,
+                        std::size_t row_bytes) noexcept {
+    if (src == nullptr || dst == nullptr || rows == 0 || row_bytes == 0 ||
+        src_stride < row_bytes || dst_stride < row_bytes) {
+        return false;
+    }
+    if (!EnsureAxclThreadContext()) {
+        return false;
+    }
+
+    axclrtMemcpyKind kind = AXCL_MEMCPY_HOST_TO_HOST;
+    if (src_is_device && dst_is_device) {
+        kind = AXCL_MEMCPY_DEVICE_TO_DEVICE;
+    } else if (!src_is_device && dst_is_device) {
+        kind = AXCL_MEMCPY_HOST_TO_DEVICE;
+    } else if (src_is_device && !dst_is_device) {
+        kind = AXCL_MEMCPY_DEVICE_TO_HOST;
+    }
+
+    for (std::size_t row = 0; row < rows; ++row) {
+        auto* dst_row = static_cast<std::uint8_t*>(dst) + row * dst_stride;
+        const auto* src_row = static_cast<const std::uint8_t*>(src) + row * src_stride;
+        if (axclrtMemcpy(dst_row, src_row, row_bytes, kind) != AXCL_SUCC) {
+            return false;
+        }
+    }
+
+    return true;
+}
+#endif
 
 void CopyPlaneByCpu(const std::uint8_t* src,
                     std::size_t src_stride,
@@ -171,11 +218,30 @@ bool CopyImageImpl(const ImageDescriptor& source_descriptor,
             return true;
         }
 
-        if (CopyFrameByCsc(*source_frame, destination)) {
-            return true;
+        bool ivps_copy_ok = true;
+        for (std::size_t plane = 0; plane < plane_count; ++plane) {
+            const auto rows = PlaneRows(source_descriptor, plane);
+            const auto row_bytes = PlaneRowBytes(source_descriptor, plane);
+            const auto src_stride = static_cast<std::size_t>(source_frame->u32PicStride[plane]);
+            const auto dst_stride = destination->stride(plane);
+            if (row_bytes == 0 || src_stride < row_bytes || dst_stride < row_bytes) {
+                ivps_copy_ok = false;
+                break;
+            }
+
+            if (!CopyPlaneByIvps(source_frame->u64PhyAddr[plane], src_stride,
+                                 destination->physical_address(plane), dst_stride,
+                                 rows, row_bytes)) {
+                ivps_copy_ok = false;
+                break;
+            }
         }
 
-        if (plane_count > 1 && CopyFrameByCmm(*source_frame, destination)) {
+        if (ivps_copy_ok) {
+            return destination->InvalidateCache();
+        }
+
+        if (CopyFrameByCsc(*source_frame, destination)) {
             return true;
         }
     } else {
@@ -203,6 +269,23 @@ bool CopyImageImpl(const ImageDescriptor& source_descriptor,
     }
 
     for (std::size_t plane = 0; plane < plane_count; ++plane) {
+#if defined(AXSDK_PLATFORM_AXCL)
+        const bool src_is_device = source_phy_addrs[plane] != 0;
+        const bool dst_is_device = destination->physical_address(plane) != 0;
+        if (src_is_device || dst_is_device) {
+            const void* runtime_src = src_is_device ? reinterpret_cast<const void*>(source_phy_addrs[plane])
+                                                    : source_vir_addrs[plane];
+            void* runtime_dst = dst_is_device ? reinterpret_cast<void*>(destination->physical_address(plane))
+                                              : destination->virtual_address(plane);
+            if (!CopyPlaneByRuntime(runtime_src, source_strides[plane], src_is_device,
+                                    runtime_dst, destination->stride(plane), dst_is_device,
+                                    PlaneRows(source_descriptor, plane), PlaneRowBytes(source_descriptor, plane))) {
+                return false;
+            }
+            continue;
+        }
+#endif
+
         const auto* src = static_cast<const std::uint8_t*>(source_vir_addrs[plane]);
         auto* dst = destination->mutable_plane_data(plane);
         if (src == nullptr || dst == nullptr) {
