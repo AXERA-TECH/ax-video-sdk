@@ -498,7 +498,7 @@ public:
         }
     }
 
-    bool SetOsd(const PipelineOsdFrame& osd) override {
+    bool SetOsd(const common::DrawFrame& osd) override {
         if (!open_ || !drawer_) {
             return false;
         }

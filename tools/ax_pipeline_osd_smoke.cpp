@@ -136,10 +136,10 @@ int Run(const std::string& input_path, const std::string& output_jpeg, int timeo
         return 7;
     }
 
-    pipeline::PipelineOsdFrame osd{};
+    common::DrawFrame osd{};
     osd.hold_frames = 0;
-    pipeline::PipelineOsdBitmap bitmap{};
-    bitmap.format = pipeline::PipelineOsdBitmapFormat::kRgb888;
+    common::DrawBitmap bitmap{};
+    bitmap.format = common::DrawBitmapFormat::kRgb888;
     bitmap.alpha = 255;
     bitmap.width = 16;
     bitmap.height = 16;
@@ -152,7 +152,7 @@ int Run(const std::string& input_path, const std::string& output_jpeg, int timeo
         bitmap.data[index + 2U] = 0;
     }
     osd.bitmaps.push_back(std::move(bitmap));
-    osd.rects.push_back(pipeline::PipelineOsdRect{
+    osd.rects.push_back(common::DrawRect{
         40,
         40,
         120,
@@ -165,7 +165,7 @@ int Run(const std::string& input_path, const std::string& output_jpeg, int timeo
         0,
         0,
     });
-    osd.lines.push_back(pipeline::PipelineOsdLine{
+    osd.lines.push_back(common::DrawLine{
         {
             {220, 80},
             {340, 160},
@@ -175,12 +175,12 @@ int Run(const std::string& input_path, const std::string& output_jpeg, int timeo
         255,
         0xFF0000,
     });
-    osd.mosaics.push_back(pipeline::PipelineOsdMosaic{
+    osd.mosaics.push_back(common::DrawMosaic{
         520,
         120,
         160,
         120,
-        pipeline::PipelineOsdMosaicBlockSize::k16,
+        common::DrawMosaicBlockSize::k16,
     });
 
     if (!pipeline->SetOsd(osd)) {

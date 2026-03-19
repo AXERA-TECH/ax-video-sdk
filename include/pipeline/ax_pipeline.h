@@ -35,16 +35,6 @@ struct PipelineFrameOutputConfig {
     common::ResizeOptions resize{};
 };
 
-using PipelineOsdPoint = common::DrawPoint;
-using PipelineOsdLine = common::DrawLine;
-using PipelineOsdPolygon = common::DrawPolygon;
-using PipelineOsdRect = common::DrawRect;
-using PipelineOsdMosaicBlockSize = common::DrawMosaicBlockSize;
-using PipelineOsdMosaic = common::DrawMosaic;
-using PipelineOsdBitmapFormat = common::DrawBitmapFormat;
-using PipelineOsdBitmap = common::DrawBitmap;
-using PipelineOsdFrame = common::DrawFrame;
-
 struct PipelineConfig {
     std::int32_t device_id{-1};
     PipelineInputConfig input{};
@@ -72,7 +62,7 @@ public:
     virtual common::AxImage::Ptr GetLatestFrame() = 0;
     virtual bool GetLatestFrame(common::AxImage& output_image) = 0;
     virtual void SetFrameCallback(FrameCallback callback) = 0;
-    virtual bool SetOsd(const PipelineOsdFrame& osd) = 0;
+    virtual bool SetOsd(const common::DrawFrame& osd) = 0;
     virtual void ClearOsd() noexcept = 0;
 
     virtual PipelineStats GetStats() const = 0;
