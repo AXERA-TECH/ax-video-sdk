@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <atomic>
 #include <thread>
 
 #include "ax_venc_api.h"
@@ -158,8 +159,20 @@ protected:
 
         const auto& frame_info = common::internal::AxImageAccess::GetAxFrameInfo(frame);
         const auto ret = AX_VENC_SendFrame(channel_, &frame_info, kAxWaitMs);
-        if (ret != AX_SUCCESS && ret != AX_ERR_VENC_BUF_FULL && ret != AX_ERR_VENC_QUEUE_FULL) {
-            std::fprintf(stderr, "ax620e venc: AX_VENC_SendFrame chn=%d ret=0x%x\n", channel_, ret);
+        if (ret != AX_SUCCESS) {
+            static std::atomic<std::uint32_t> s_send_failures{0};
+            const auto failures = s_send_failures.fetch_add(1, std::memory_order_relaxed);
+            if (failures < 20 || (failures % 200) == 0) {
+                std::fprintf(stderr,
+                             "ax620e venc: AX_VENC_SendFrame chn=%d ret=0x%x blk=0x%x fmt=%d %ux%u stride=%u/%u pts=%llu seq=%llu\n",
+                             channel_, ret,
+                             frame_info.stVFrame.u32BlkId[0],
+                             static_cast<int>(frame_info.stVFrame.enImgFormat),
+                             frame_info.stVFrame.u32Width, frame_info.stVFrame.u32Height,
+                             frame_info.stVFrame.u32PicStride[0], frame_info.stVFrame.u32PicStride[1],
+                             static_cast<unsigned long long>(frame_info.stVFrame.u64PTS),
+                             static_cast<unsigned long long>(frame_info.stVFrame.u64SeqNum));
+            }
         }
         return ret == AX_SUCCESS;
     }
@@ -175,6 +188,15 @@ protected:
         if (ret != AX_SUCCESS) {
             if (ret == AX_ERR_VENC_FLOW_END) {
                 *flow_end = true;
+            }
+            if (ret == AX_ERR_VENC_QUEUE_EMPTY || ret == AX_ERR_VENC_BUF_EMPTY || ret == AX_ERR_VENC_TIMEOUT) {
+                return false;
+            }
+            static std::atomic<std::uint32_t> s_get_failures{0};
+            const auto failures = s_get_failures.fetch_add(1, std::memory_order_relaxed);
+            if (failures < 20 || (failures % 200) == 0) {
+                std::fprintf(stderr, "ax620e venc: AX_VENC_GetStream chn=%d ret=0x%x flow_end=%d\n",
+                             channel_, ret, *flow_end ? 1 : 0);
             }
             return false;
         }

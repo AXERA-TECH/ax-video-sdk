@@ -32,6 +32,7 @@ namespace axvsdk::codec::internal {
 namespace {
 
 constexpr std::size_t kDecodeInputQueueDepth = 16;
+constexpr std::size_t kCallbackQueueDepth = 8;  // non-blocking; drop oldest when slow consumer
 
 common::ImageDescriptor MakeNativeOutputDescriptor(const Mp4VideoInfo& video_info) noexcept {
     common::ImageDescriptor descriptor{};
@@ -94,7 +95,6 @@ bool AxVideoDecoderBase::Open(const VideoDecoderConfig& config) {
 void AxVideoDecoderBase::Close() noexcept {
     Stop();
     if (open_) {
-        DestroyBackend();
         {
             std::lock_guard<std::mutex> lock(input_mutex_);
             pending_packets_.clear();
@@ -107,8 +107,11 @@ void AxVideoDecoderBase::Close() noexcept {
         {
             std::lock_guard<std::mutex> lock(callback_mutex_);
             pending_callback_frame_.reset();
+            callback_queue_.clear();
             frame_callback_ = {};
+            callback_mode_ = FrameCallbackMode::kLatest;
         }
+        DestroyBackend();
         open_ = false;
     }
 }
@@ -213,8 +216,16 @@ bool AxVideoDecoderBase::GetLatestFrame(common::AxImage& output_image) {
 }
 
 void AxVideoDecoderBase::SetFrameCallback(FrameCallback callback) {
+    SetFrameCallback(std::move(callback), FrameCallbackMode::kLatest);
+}
+
+void AxVideoDecoderBase::SetFrameCallback(FrameCallback callback, FrameCallbackMode mode) {
     std::lock_guard<std::mutex> lock(callback_mutex_);
     frame_callback_ = std::move(callback);
+    callback_mode_ = mode;
+    pending_callback_frame_.reset();
+    callback_queue_.clear();
+    callback_cv_.notify_all();
 }
 
 const Mp4VideoInfo& AxVideoDecoderBase::video_info() const noexcept {
@@ -296,14 +307,23 @@ void AxVideoDecoderBase::CallbackLoop() {
         common::AxImage::Ptr frame;
         {
             std::unique_lock<std::mutex> lock(callback_mutex_);
-            callback_cv_.wait(lock, [this] { return callback_stop_ || pending_callback_frame_ != nullptr; });
+            callback_cv_.wait(lock, [this] {
+                return callback_stop_ || pending_callback_frame_ != nullptr || !callback_queue_.empty();
+            });
 
-            if (callback_stop_ && pending_callback_frame_ == nullptr) {
+            if (callback_stop_ && pending_callback_frame_ == nullptr && callback_queue_.empty()) {
                 return;
             }
 
             callback = frame_callback_;
-            frame = std::move(pending_callback_frame_);
+            if (callback_mode_ == FrameCallbackMode::kLatest) {
+                frame = std::move(pending_callback_frame_);
+            } else {
+                if (!callback_queue_.empty()) {
+                    frame = std::move(callback_queue_.front());
+                    callback_queue_.pop_front();
+                }
+            }
         }
 
         if (callback && frame) {
@@ -338,18 +358,10 @@ void AxVideoDecoderBase::PublishFrame(const AX_VIDEO_FRAME_INFO_T& frame_info) {
 #endif
         const auto ref_ret = AX_POOL_IncreaseRefCnt(block_id);
         if (ref_ret == AX_SUCCESS) {
-            // Some decoders return padded heights (e.g. 1088 for 1080p H.264).
-            // Expose the logical stream dimensions to callers while keeping the underlying buffer untouched.
-            AX_VIDEO_FRAME_INFO_T normalized = frame_info;
-            if (config_.stream.width != 0 && normalized.stVFrame.u32Width > config_.stream.width) {
-                normalized.stVFrame.u32Width = config_.stream.width;
-            }
-            if (config_.stream.height != 0 && normalized.stVFrame.u32Height > config_.stream.height) {
-                normalized.stVFrame.u32Height = config_.stream.height;
-            }
-
+            // Keep the raw frame info unchanged. Some modules (notably VENC) may derive plane offsets internally
+            // from width/height/stride, and clamping padded dimensions here can corrupt chroma addressing.
             published_frame = common::internal::AxImageAccess::WrapVideoFrame(
-                normalized, [](const AX_VIDEO_FRAME_INFO_T& retained_frame) {
+                frame_info, [](const AX_VIDEO_FRAME_INFO_T& retained_frame) {
                     if (retained_frame.stVFrame.u32BlkId[0] != AX_INVALID_BLOCKID) {
 #if defined(AXSDK_PLATFORM_AXCL)
                         if (!common::internal::EnsureAxclThreadContext()) {
@@ -381,7 +393,14 @@ void AxVideoDecoderBase::PublishFrame(const AX_VIDEO_FRAME_INFO_T& frame_info) {
     {
         std::lock_guard<std::mutex> lock(callback_mutex_);
         if (frame_callback_) {
-            pending_callback_frame_ = published_frame;
+            if (callback_mode_ == FrameCallbackMode::kLatest) {
+                pending_callback_frame_ = published_frame;
+            } else {
+                callback_queue_.push_back(published_frame);
+                if (callback_queue_.size() > kCallbackQueueDepth) {
+                    callback_queue_.pop_front();
+                }
+            }
             callback_cv_.notify_one();
         }
     }

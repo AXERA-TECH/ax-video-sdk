@@ -35,7 +35,8 @@ int Run(const char* input_path,
         int device_id,
         int expected_decoded_frames,
         int timeout_seconds) {
-    auto demuxer = tooling::OpenDemuxer(input_path, false);
+    // Use real-time pacing for MP4/file inputs to avoid overwhelming VDEC/VENC on embedded SoCs.
+    auto demuxer = tooling::OpenDemuxer(input_path, true);
     if (!demuxer) {
         std::cerr << "OpenDemuxer failed\n";
         return 2;
@@ -46,7 +47,7 @@ int Run(const char* input_path,
     system_options.device_id = device_id;
     system_options.enable_vdec = true;
     system_options.enable_venc = true;
-    system_options.enable_ivps = false;
+    system_options.enable_ivps = true;
     if (!common::InitializeSystem(system_options)) {
         std::cerr << "InitializeSystem failed\n";
         return 3;
@@ -133,7 +134,7 @@ int Run(const char* input_path,
         } else {
             dropped_frames.fetch_add(1, std::memory_order_relaxed);
         }
-    });
+    }, codec::FrameCallbackMode::kQueue);
 
     if (!encoder->Start()) {
         std::cerr << "encoder Start failed\n";

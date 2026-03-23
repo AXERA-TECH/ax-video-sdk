@@ -444,7 +444,7 @@ int Run(const char* pull_url,
         } else {
             dropped_frames.fetch_add(1, std::memory_order_relaxed);
         }
-    });
+    }, codec::FrameCallbackMode::kQueue);
 
     if (!encoder->Start()) {
         publisher.close();

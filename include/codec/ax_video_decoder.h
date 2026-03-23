@@ -25,6 +25,15 @@ struct VideoDecoderConfig {
 
 using FrameCallback = std::function<void(common::AxImage::Ptr frame)>;
 
+enum class FrameCallbackMode {
+    // Only keep the newest frame for the callback thread.
+    // If the callback is slow, intermediate frames are dropped.
+    kLatest = 0,
+    // Deliver frames in-order using an internal bounded queue.
+    // If the callback is too slow, the oldest frames are dropped to avoid blocking decode.
+    kQueue = 1,
+};
+
 class VideoDecoder {
 public:
     virtual ~VideoDecoder() = default;
@@ -50,6 +59,10 @@ public:
     // 回调与解码线程解耦；慢回调不会阻塞底层解码线程本身。
     // 未注册回调时，不会为了回调额外做图像拷贝。
     virtual void SetFrameCallback(FrameCallback callback) = 0;
+
+    // 高级接口：选择回调帧投递策略。
+    // 默认 kLatest 更符合 “获取最新一帧” 语义；pipeline 需要完整帧序列时可用 kQueue。
+    virtual void SetFrameCallback(FrameCallback callback, FrameCallbackMode mode) = 0;
 };
 
 std::unique_ptr<VideoDecoder> CreateVideoDecoder();

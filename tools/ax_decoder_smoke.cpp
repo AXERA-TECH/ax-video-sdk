@@ -10,13 +10,14 @@
 #include "ax_cmdline_utils.h"
 #include "ax_mp4_decode_util.h"
 #include "codec/ax_video_decoder.h"
+#include "ax_image_internal.h"
 #include "common/ax_system.h"
 
 namespace {
 
 using namespace axvsdk;
 
-int Run(const char* input_path, int expected_frames, int timeout_seconds) {
+int Run(const char* input_path, int expected_frames, int timeout_seconds, bool dump_meta) {
     common::SystemOptions system_options{};
     system_options.enable_vdec = true;
     system_options.enable_venc = false;
@@ -59,10 +60,21 @@ int Run(const char* input_path, int expected_frames, int timeout_seconds) {
         if (!frame) {
             return;
         }
+        if (dump_meta) {
+            const auto& fi = common::internal::AxImageAccess::GetAxFrameInfo(*frame);
+            const auto index = callback_count.load(std::memory_order_relaxed);
+            if (index < 64) {
+                std::cerr << "frame[" << index << "]"
+                          << " pts=" << static_cast<unsigned long long>(fi.stVFrame.u64PTS)
+                          << " time_ref=" << fi.stVFrame.u32TimeRef
+                          << " seq=" << static_cast<unsigned long long>(fi.stVFrame.u64SeqNum)
+                          << " blk=" << fi.stVFrame.u32BlkId[0] << "\n";
+            }
+        }
         width.store(frame->width(), std::memory_order_relaxed);
         height.store(frame->height(), std::memory_order_relaxed);
         callback_count.fetch_add(1, std::memory_order_relaxed);
-    });
+    }, codec::FrameCallbackMode::kQueue);
 
     if (!decoder->Start()) {
         std::cerr << "decoder Start failed\n";
@@ -127,6 +139,7 @@ int main(int argc, char** argv) {
     parser.add<std::string>("input", 'i', "input MP4 path", false, "");
     parser.add<int>("expected-frames", 'n', "expected decoded frames", false, 10);
     parser.add<int>("timeout", 't', "timeout seconds", false, 15);
+    parser.add("dump-meta", 0, "dump first 64 decoded frame metadata (PTS/SeqNum/TimeRef) to stderr");
 
     const auto cli_result = tooling::ParseCommandLine(parser, argc, argv);
     if (cli_result != tooling::CliParseResult::kOk) {
@@ -136,12 +149,14 @@ int main(int argc, char** argv) {
     std::string input_path;
     int expected_frames = 10;
     int timeout_seconds = 15;
+    bool dump_meta = false;
     if (!tooling::GetRequiredArgument(parser, "input", 0, "input", &input_path, std::cerr) ||
         !tooling::GetOptionalArgument(parser, "expected-frames", 1, 10, &expected_frames, std::cerr) ||
         !tooling::GetOptionalArgument(parser, "timeout", 2, 15, &timeout_seconds, std::cerr)) {
         std::cerr << parser.usage();
         return 1;
     }
+    dump_meta = parser.exist("dump-meta");
 
-    return Run(input_path.c_str(), expected_frames, timeout_seconds);
+    return Run(input_path.c_str(), expected_frames, timeout_seconds, dump_meta);
 }

@@ -271,6 +271,8 @@ typedef struct
 #if MP4D_TIMESTAMPS_SUPPORTED
     unsigned *timestamp;
     unsigned *duration;
+    /* Composition time offset (ctts). Version 0: unsigned offsets; Version 1: signed offsets. */
+    int *composition_offset;
 #endif
 
 } MP4D_track_t;
@@ -2858,6 +2860,11 @@ broken_android_meta_hack:
 #if MP4D_TIMESTAMPS_SUPPORTED
                 MALLOC(unsigned int*, tr->timestamp, ts_count*4);
                 MALLOC(unsigned int*, tr->duration, ts_count*4);
+                if (!tr->composition_offset)
+                {
+                    MALLOC(int*, tr->composition_offset, ts_count*4);
+                    memset(tr->composition_offset, 0, ts_count * sizeof(int));
+                }
 #endif
 
                 for (i = 0; i < count; i++)
@@ -2868,9 +2875,15 @@ broken_android_meta_hack:
 #if MP4D_TIMESTAMPS_SUPPORTED
                     if (k + sc > ts_count)
                     {
+                        unsigned old_ts_count = ts_count;
                         ts_count = k + sc;
                         tr->timestamp = (unsigned int*)realloc(tr->timestamp, ts_count * sizeof(unsigned));
                         tr->duration  = (unsigned int*)realloc(tr->duration,  ts_count * sizeof(unsigned));
+                        tr->composition_offset = (int*)realloc(tr->composition_offset, ts_count * sizeof(int));
+                        if (ts_count > old_ts_count && tr->composition_offset)
+                        {
+                            memset(tr->composition_offset + old_ts_count, 0, (ts_count - old_ts_count) * sizeof(int));
+                        }
                     }
                     for (j = 0; j < sc; j++)
                     {
@@ -2885,13 +2898,36 @@ broken_android_meta_hack:
         case BOX_ctts:
             {
                 unsigned count = READ(4);
+                unsigned j, k = 0, ts_count = count;
+                int version = (FullAtomVersionAndFlags >> 24) & 0xff;
+#if MP4D_TIMESTAMPS_SUPPORTED
+                if (!tr->composition_offset)
+                {
+                    MALLOC(int*, tr->composition_offset, ts_count*4);
+                    memset(tr->composition_offset, 0, ts_count * sizeof(int));
+                }
+#endif
                 for (i = 0; i < count; i++)
                 {
-                    int sc = READ(4);
-                    int d =  READ(4);
-                    (void)sc;
-                    (void)d;
+                    unsigned sc = READ(4);
+                    int d = (version == 1) ? (int)(int32_t)READ(4) : (int)READ(4);
                     TRACE(("sample %8d count %8d decoding to composition offset %8d\n", i, sc, d));
+#if MP4D_TIMESTAMPS_SUPPORTED
+                    if (k + sc > ts_count)
+                    {
+                        unsigned old_ts_count = ts_count;
+                        ts_count = k + sc;
+                        tr->composition_offset = (int*)realloc(tr->composition_offset, ts_count * sizeof(int));
+                        if (ts_count > old_ts_count && tr->composition_offset)
+                        {
+                            memset(tr->composition_offset + old_ts_count, 0, (ts_count - old_ts_count) * sizeof(int));
+                        }
+                    }
+                    for (j = 0; j < sc; j++)
+                    {
+                        tr->composition_offset[k++] = d;
+                    }
+#endif
                 }
             }
             break;
@@ -3314,6 +3350,7 @@ void MP4D_close(MP4D_demux_t *mp4)
 #if MP4D_TIMESTAMPS_SUPPORTED
         FREE(tr->timestamp);
         FREE(tr->duration);
+        FREE(tr->composition_offset);
 #endif
         FREE(tr->sample_to_chunk);
         FREE(tr->chunk_offset);

@@ -24,8 +24,8 @@ namespace axvsdk::codec {
 namespace {
 
 // Some AX VDEC paths are picky about the start code length for AnnexB streams.
-// 0x000001 is valid for both AVC/HEVC AnnexB and is widely accepted.
-constexpr std::array<std::uint8_t, 3> kAnnexBStartCode{0x00, 0x00, 0x01};
+// Prefer 4-byte start codes (0x00000001), which matches most raw H.264/H.265 bitstreams and MSP samples.
+constexpr std::array<std::uint8_t, 4> kAnnexBStartCode{0x00, 0x00, 0x00, 0x01};
 
 struct NalUnitView {
     const std::uint8_t* data{nullptr};
@@ -377,10 +377,10 @@ bool AxMp4Demuxer::ReadNextPacket(EncodedPacket* packet) {
     }
 
     unsigned frame_bytes = 0;
-    unsigned timestamp = 0;
+    unsigned dts = 0;
     unsigned duration = 0;
     const auto offset = static_cast<std::size_t>(
-        MP4D_frame_offset(&impl_->demux, impl_->track_index, impl_->sample_index, &frame_bytes, &timestamp, &duration));
+        MP4D_frame_offset(&impl_->demux, impl_->track_index, impl_->sample_index, &frame_bytes, &dts, &duration));
 
     if (offset > impl_->file_bytes.size() || frame_bytes > (impl_->file_bytes.size() - offset)) {
         return false;
@@ -399,7 +399,20 @@ bool AxMp4Demuxer::ReadNextPacket(EncodedPacket* packet) {
     }
 
     packet->codec = impl_->video_info.codec;
-    packet->pts = timestamp;
+    // minimp4 provides DTS in stts, but does not apply CTTS to timestamps.
+    // For streams with B-frames, feeding DTS as PTS causes visible "jitter" (display-order issues) on VDEC.
+    // Compute PTS = DTS + CTTS (track timescale units). The pipeline demuxer is responsible for any normalization.
+    const auto* tr = impl_->demux.track + impl_->track_index;
+    std::int64_t pts_ts = static_cast<std::int64_t>(dts);
+#if MP4D_TIMESTAMPS_SUPPORTED
+    if (tr != nullptr && tr->composition_offset != nullptr) {
+        pts_ts += static_cast<std::int64_t>(tr->composition_offset[impl_->sample_index]);
+    }
+#endif
+    if (pts_ts < 0) {
+        pts_ts = 0;
+    }
+    packet->pts = static_cast<std::uint64_t>(pts_ts);
     packet->duration = duration;
     packet->key_frame = key_frame;
     packet->data.clear();

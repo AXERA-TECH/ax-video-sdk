@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include "ax_global_type.h"
 
@@ -28,6 +29,7 @@ public:
     common::AxImage::Ptr GetLatestFrame() override;
     bool GetLatestFrame(common::AxImage& output_image) override;
     void SetFrameCallback(FrameCallback callback) override;
+    void SetFrameCallback(FrameCallback callback, FrameCallbackMode mode) override;
 
 protected:
     virtual bool CreateBackend(const Mp4VideoInfo& video_info) = 0;
@@ -76,7 +78,9 @@ private:
     std::mutex callback_mutex_;
     std::condition_variable callback_cv_;
     FrameCallback frame_callback_;
+    FrameCallbackMode callback_mode_{FrameCallbackMode::kLatest};
     common::AxImage::Ptr pending_callback_frame_;
+    std::deque<common::AxImage::Ptr> callback_queue_;
 };
 
 std::unique_ptr<VideoDecoder> CreatePlatformVideoDecoder();

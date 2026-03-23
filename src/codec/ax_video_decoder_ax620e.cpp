@@ -77,6 +77,19 @@ AX_VDEC_GRP AcquireGroupId() {
     return -1;
 }
 
+bool ReserveGroupId(AX_VDEC_GRP group) {
+    if (group < 0 || group >= AX_VDEC_MAX_GRP_NUM) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(GroupMutex());
+    auto* slots = GroupSlots();
+    if (slots[group]) {
+        return false;
+    }
+    slots[group] = true;
+    return true;
+}
+
 void ReleaseGroupId(AX_VDEC_GRP group) {
     if (group < 0 || group >= AX_VDEC_MAX_GRP_NUM) {
         return;
@@ -101,8 +114,9 @@ AX_PAYLOAD_TYPE_E ToAxPayload(VideoCodecType codec) noexcept {
 }
 
 AX_U32 ResolveStreamBufferSize(const Mp4VideoInfo& video_info) noexcept {
-    const auto fallback = std::max<AX_U32>(video_info.width * video_info.height * 3U / 2U, 1024U * 1024U);
-    return fallback;
+    // 20e samples typically use a few MiB stream buffer. Too small can trigger unexpected stalls on file sources.
+    const auto fallback = std::max<AX_U32>(video_info.width * video_info.height * 3U / 2U, 4U * 1024U * 1024U);
+    return AlignUp(fallback, kStreamAlignment);
 }
 
 class Ax620eVideoDecoder final : public AxVideoDecoderBase {
@@ -172,9 +186,11 @@ protected:
         const AX_U32 group_height = ResolveGroupHeight(video_info);
         const AX_U32 frame_height = video_info.height == 0 ? AX_VDEC_MAX_HEIGHT : AlignUp(video_info.height, 16U);
         group_attr.enCodecType = payload;
-        group_attr.enInputMode = AX_VDEC_INPUT_MODE_COMPAT;
+        // Use FRAME mode so VDEC can honor per-access-unit PTS for display-order output (B-frame reorder).
+        group_attr.enInputMode = AX_VDEC_INPUT_MODE_FRAME;
         // We use AX_VDEC_GetFrame to fetch decoded frames; keep VDEC in unlink mode (same as MSP samples).
         group_attr.enLinkMode = AX_UNLINK_MODE;
+        // When enOutOrder=DISP, correct PTS becomes important for B-frame reorder (MP4 H.264 with B-frames).
         group_attr.enOutOrder = AX_VDEC_OUTPUT_ORDER_DISP;
         group_attr.u32PicWidth = group_width;
         group_attr.u32PicHeight = group_height;
@@ -184,28 +200,43 @@ protected:
         group_attr.u32FrameBufCnt = video_info.codec == VideoCodecType::kH264 ? kFrameBufferCountH264 : kFrameBufferCount;
         group_attr.s32DestroyTimeout = 0;
 
-        group_ = AcquireGroupId();
-        if (group_ < 0) {
-            std::fprintf(stderr, "ax620e CreateBackend: no free vdec group\n");
-            return false;
-        }
+        // VDEC group ids are global across processes. If another process has already created a group id,
+        // AX_VDEC_CreateGrp returns AX_ERR_VDEC_EXIST. Probe for a free id by trying 0..MAX.
+        AX_S32 create_ret = AX_ERR_VDEC_NO_AVAILABLE_GRP;
+        for (AX_VDEC_GRP candidate = 0; candidate < AX_VDEC_MAX_GRP_NUM; ++candidate) {
+            if (!ReserveGroupId(candidate)) {
+                continue;
+            }
 
-        AX_MOD_INFO_T mod_info{};
-        mod_info.enModId = AX_ID_VDEC;
-        mod_info.s32GrpId = group_;
-        mod_info.s32ChnId = 0;
-        (void)AX_SYS_MemSetConfig(&mod_info, reinterpret_cast<AX_S8*>(const_cast<char*>("VDEC")));
+            AX_MOD_INFO_T mod_info{};
+            mod_info.enModId = AX_ID_VDEC;
+            mod_info.s32GrpId = candidate;
+            mod_info.s32ChnId = 0;
+            (void)AX_SYS_MemSetConfig(&mod_info, reinterpret_cast<AX_S8*>(const_cast<char*>("VDEC")));
 
-        const auto create_ret = AX_VDEC_CreateGrp(group_, &group_attr);
-        if (create_ret != AX_SUCCESS) {
+            create_ret = AX_VDEC_CreateGrp(candidate, &group_attr);
+            if (create_ret == AX_SUCCESS) {
+                group_ = candidate;
+                break;
+            }
+
+            if (create_ret == AX_ERR_VDEC_EXIST) {
+                ReleaseGroupId(candidate);
+                continue;
+            }
+
             std::fprintf(stderr,
                          "ax620e CreateBackend: AX_VDEC_CreateGrp grp=%d codec=%d width=%u height=%u frame_h=%u "
                          "stream_buf=%u frame_buf_cnt=%u vb_src=%d ret=0x%x\n",
-                         group_, static_cast<int>(payload), group_attr.u32PicWidth, group_attr.u32PicHeight,
+                         candidate, static_cast<int>(payload), group_attr.u32PicWidth, group_attr.u32PicHeight,
                          group_attr.u32FrameHeight, group_attr.u32StreamBufSize, group_attr.u32FrameBufCnt,
                          static_cast<int>(group_attr.enVdecVbSource), create_ret);
-            ReleaseGroupId(group_);
+            ReleaseGroupId(candidate);
             group_ = -1;
+            return false;
+        }
+        if (group_ < 0 || create_ret != AX_SUCCESS) {
+            std::fprintf(stderr, "ax620e CreateBackend: no available vdec group (ret=0x%x)\n", create_ret);
             return false;
         }
 
@@ -227,6 +258,9 @@ protected:
         submitted_frames_.store(0, std::memory_order_relaxed);
         received_frames_.store(0, std::memory_order_relaxed);
         next_submit_due_ = {};
+        next_pts_us_ = 0;
+        empty_polls_ = 0;
+        last_status_report_ = {};
 
         const auto* token = reinterpret_cast<const AX_S8*>("VdecInputStream");
         for (AX_U32 i = 0; i < stream_buf_count; ++i) {
@@ -263,6 +297,9 @@ protected:
         submitted_frames_.store(0, std::memory_order_relaxed);
         received_frames_.store(0, std::memory_order_relaxed);
         next_submit_due_ = {};
+        next_pts_us_ = 0;
+        empty_polls_ = 0;
+        last_status_report_ = {};
 
         if (group_ >= 0) {
             if (frame_pool_attached_) {
@@ -298,8 +335,9 @@ protected:
         AX_VDEC_GRP_PARAM_T group_param{};
         group_param.enVdecMode = VIDEO_DEC_MODE_IPB;
         (void)AX_VDEC_SetGrpParam(group_, &group_param);
-        // Follow 20e sample default (preview) to avoid firmware-specific playback timing behavior.
-        if (AX_VDEC_SetDisplayMode(group_, AX_VDEC_DISPLAY_MODE_PREVIEW) != AX_SUCCESS) {
+        // Playback mode enables VDEC display-order output for streams with B-frames (MP4 H.264, etc.).
+        // PREVIEW mode may output frames in decode order on some 20e firmwares, causing visible "jitter"/rewind.
+        if (AX_VDEC_SetDisplayMode(group_, AX_VDEC_DISPLAY_MODE_PLAYBACK) != AX_SUCCESS) {
             return false;
         }
 
@@ -344,15 +382,22 @@ protected:
 
         auto& buf = stream_buffers_[stream_buffer_index_ % stream_buffers_.size()];
         std::memcpy(buf.vir, packet.data.data(), packet.data.size());
+        // Ensure VDEC can see the latest packet bytes (buffer may be cached depending on platform config).
+        (void)AX_SYS_MflushCache(buf.phy, buf.vir, static_cast<AX_U32>(packet.data.size()));
 
         AX_VDEC_STREAM_T stream{};
-        stream.u64PTS = packet.pts;
+        // IMPORTANT:
+        // Some 20e firmwares behave poorly when input PTS is non-monotonic (MP4 with B-frames has out-of-order PTS in
+        // decode order). Follow MSP samples: always feed a monotonic PTS in microseconds.
+        stream.u64PTS = next_pts_us_;
         stream.bEndOfFrame = AX_TRUE;
         stream.bEndOfStream = AX_FALSE;
         stream.bSkipDisplay = AX_FALSE;
         stream.u32StreamPackLen = static_cast<AX_U32>(packet.data.size());
         stream.pu8Addr = buf.vir;
-        stream.u64PhyAddr = buf.phy;
+        // Match 20e samples: use virtual address only.
+        // Some firmware versions behave incorrectly if u64PhyAddr is provided here.
+        stream.u64PhyAddr = 0;
 
         while (!stop_requested()) {
             const auto ret = AX_VDEC_SendStream(group_, &stream, kAxWaitMs);
@@ -370,7 +415,27 @@ protected:
         }
 
         stream_buffer_index_ = (stream_buffer_index_ + 1) % stream_buffers_.size();
+        // Increment PTS cursor by the provided duration (already in us), with a conservative fallback.
+        next_pts_us_ += packet.duration > 0 ? packet.duration : 33333ULL;
         submitted_frames_.fetch_add(1, std::memory_order_relaxed);
+
+        // Light-touch status probe to catch decode errors early on 20e.
+        if ((submitted_frames_.load(std::memory_order_relaxed) % 30) == 0) {
+            AX_VDEC_GRP_STATUS_T st{};
+            if (AX_VDEC_QueryStatus(group_, &st) == AX_SUCCESS) {
+                const auto& e = st.stVdecDecErr;
+                if (e.s32FormatErr || e.s32PicSizeErrSet || e.s32StreamUnsprt || e.s32PackErr || e.s32RefErrSet ||
+                    e.s32PicBufSizeErrSet || e.s32StreamSizeOver || e.s32VdecStreamNotRelease) {
+                    std::fprintf(stderr,
+                                 "ax620e vdec status grp=%d recv=%u dec=%u left_bytes=%u left_frames=%u left_pics=%u "
+                                 "fifo_full=%d err{fmt=%d size=%d unsup=%d pack=%d ref=%d picbuf=%d over=%d notrel=%d}\n",
+                                 group_, st.u32RecvStreamFrames, st.u32DecodeStreamFrames, st.u32LeftStreamBytes,
+                                 st.u32LeftStreamFrames, st.u32LeftPics, st.bInputFifoIsFull, e.s32FormatErr,
+                                 e.s32PicSizeErrSet, e.s32StreamUnsprt, e.s32PackErr, e.s32RefErrSet,
+                                 e.s32PicBufSizeErrSet, e.s32StreamSizeOver, e.s32VdecStreamNotRelease);
+                }
+            }
+        }
 
         // Backpressure: do not allow the submitter to outrun the decoder indefinitely.
         // This makes "offline" MP4 ingestion stable on 20e even when realtime_playback=false.
@@ -430,14 +495,43 @@ protected:
         const auto ret = AX_VDEC_GetFrame(group_, frame_info, kAxWaitMs);
         if (ret == AX_SUCCESS) {
             received_frames_.fetch_add(1, std::memory_order_relaxed);
+            empty_polls_ = 0;
             return true;
         }
         if (ret == AX_ERR_VDEC_FLOW_END) {
             *flow_end = true;
             return false;
         }
-        if (ret != AX_ERR_VDEC_QUEUE_EMPTY && ret != AX_ERR_VDEC_TIMED_OUT && ret != AX_ERR_VDEC_NOT_PERM &&
-            ret != AX_ERR_VDEC_UNEXIST) {
+        if (ret == AX_ERR_VDEC_QUEUE_EMPTY || ret == AX_ERR_VDEC_TIMED_OUT || ret == AX_ERR_VDEC_STRM_ERROR) {
+            // If decode stalls, periodically dump VDEC status for debugging.
+            ++empty_polls_;
+            const auto now = std::chrono::steady_clock::now();
+            const auto submitted = submitted_frames_.load(std::memory_order_relaxed);
+            const auto received = received_frames_.load(std::memory_order_relaxed);
+            const auto inflight = submitted > received ? (submitted - received) : 0ULL;
+
+            // Avoid log spam: only report when we seem to be behind (still have inflight packets) and we've been
+            // polling empty for a while.
+            if (inflight > 0 && empty_polls_ >= 10 &&
+                (last_status_report_.time_since_epoch().count() == 0 ||
+                 now - last_status_report_ > std::chrono::seconds(1))) {
+                last_status_report_ = now;
+                AX_VDEC_GRP_STATUS_T st{};
+                if (AX_VDEC_QueryStatus(group_, &st) == AX_SUCCESS) {
+                    const auto& e = st.stVdecDecErr;
+                    std::fprintf(stderr,
+                                 "ax620e vdec poll grp=%d ret=0x%x polls=%llu recv=%u dec=%u left_bytes=%u left_frames=%u "
+                                 "left_pics=%u fifo_full=%d err{fmt=%d size=%d unsup=%d pack=%d ref=%d picbuf=%d over=%d notrel=%d}\n",
+                                 group_, ret, static_cast<unsigned long long>(empty_polls_), st.u32RecvStreamFrames,
+                                 st.u32DecodeStreamFrames, st.u32LeftStreamBytes, st.u32LeftStreamFrames, st.u32LeftPics,
+                                 st.bInputFifoIsFull, e.s32FormatErr, e.s32PicSizeErrSet, e.s32StreamUnsprt, e.s32PackErr,
+                                 e.s32RefErrSet, e.s32PicBufSizeErrSet, e.s32StreamSizeOver, e.s32VdecStreamNotRelease);
+                }
+            }
+            return false;
+        }
+
+        if (ret != AX_ERR_VDEC_NOT_PERM && ret != AX_ERR_VDEC_UNEXIST) {
             std::fprintf(stderr, "ax620e ReceiveDecodedFrame: AX_VDEC_GetFrame grp=%d ret=0x%x\n", group_, ret);
         }
         return false;
@@ -460,6 +554,9 @@ private:
     std::atomic<std::uint64_t> submitted_frames_{0};
     std::atomic<std::uint64_t> received_frames_{0};
     std::chrono::steady_clock::time_point next_submit_due_{};
+    std::uint64_t next_pts_us_{0};
+    std::uint64_t empty_polls_{0};
+    std::chrono::steady_clock::time_point last_status_report_{};
 };
 
 }  // namespace

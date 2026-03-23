@@ -11,6 +11,8 @@
 #include "ax_image_copy.h"
 #if defined(AXSDK_PLATFORM_AXCL)
 #include "ax_system_internal.h"
+#else
+#include "ax_sys_api.h"
 #endif
 
 namespace axvsdk::codec {
@@ -27,6 +29,11 @@ namespace {
 
 constexpr int kEncoderStopIdlePollLimit = 10;
 constexpr std::size_t kEncoderInputFifoDepth = 4;
+
+#if defined(AXSDK_CHIP_AX620E_FAMILY)
+constexpr AX_U32 kEncoderPoolBlockCount = 8;
+constexpr AX_U64 kEncoderPoolMetaSize = 512;
+#endif
 
 std::uint32_t EstimateBitrateKbps(VideoCodecType codec,
                                   std::uint32_t width,
@@ -69,6 +76,48 @@ ResolvedVideoEncoderConfig ResolveConfig(const VideoEncoderConfig& config) noexc
 
 }  // namespace
 
+#if defined(AXSDK_CHIP_AX620E_FAMILY)
+// ax620e/ax630c family: VENC and some firmware paths are more robust with pool-backed buffers (u32BlkId valid).
+// Use a small private pool per encoder instance for reusable intermediate frames.
+static std::size_t PlaneHeight(const common::ImageDescriptor& descriptor, std::size_t plane_index) noexcept {
+    switch (descriptor.format) {
+    case common::PixelFormat::kNv12:
+        return plane_index == 0 ? descriptor.height : descriptor.height / 2U;
+    case common::PixelFormat::kRgb24:
+    case common::PixelFormat::kBgr24:
+        return descriptor.height;
+    case common::PixelFormat::kUnknown:
+    default:
+        return 0;
+    }
+}
+
+static AX_U64 ComputeImageByteSize(const common::ImageDescriptor& descriptor) noexcept {
+    const auto h0 = PlaneHeight(descriptor, 0);
+    if (h0 == 0) {
+        return 0;
+    }
+    AX_U64 total = static_cast<AX_U64>(descriptor.strides[0]) * static_cast<AX_U64>(h0);
+    if (descriptor.format == common::PixelFormat::kNv12) {
+        const auto h1 = PlaneHeight(descriptor, 1);
+        total += static_cast<AX_U64>(descriptor.strides[1]) * static_cast<AX_U64>(h1);
+    }
+    return total;
+}
+
+static bool SameDescriptor(const common::ImageDescriptor& a, const common::ImageDescriptor& b) noexcept {
+    if (a.format != b.format || a.width != b.width || a.height != b.height) {
+        return false;
+    }
+    for (std::size_t i = 0; i < common::kMaxImagePlanes; ++i) {
+        if (a.strides[i] != b.strides[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif  // AXSDK_CHIP_AX620E_FAMILY
+
 AxVideoEncoderBase::~AxVideoEncoderBase() = default;
 
 bool AxVideoEncoderBase::Open(const VideoEncoderConfig& config) {
@@ -107,6 +156,14 @@ void AxVideoEncoderBase::Close() noexcept {
             reusable_frames_.clear();
             inflight_frames_.clear();
             inflight_hold_frames_.clear();
+#if defined(AXSDK_CHIP_AX620E_FAMILY)
+            for (auto& entry : pools_) {
+                if (entry.pool_id != common::kInvalidPoolId) {
+                    (void)AX_POOL_DestroyPool(entry.pool_id);
+                }
+            }
+#endif
+            pools_.clear();
         }
         {
             std::lock_guard<std::mutex> lock(packet_mutex_);
@@ -268,6 +325,52 @@ common::AxImage::Ptr AxVideoEncoderBase::AcquireReusableFrame(const common::Imag
         }
     }
 
+#if defined(AXSDK_CHIP_AX620E_FAMILY)
+    if (descriptor.format == common::PixelFormat::kNv12) {
+        const auto block_size = ComputeImageByteSize(descriptor);
+        if (block_size != 0) {
+            std::uint32_t pool_id = common::kInvalidPoolId;
+            for (const auto& entry : pools_) {
+                if (entry.pool_id != common::kInvalidPoolId && entry.block_size == block_size &&
+                    SameDescriptor(entry.descriptor, descriptor)) {
+                    pool_id = entry.pool_id;
+                    break;
+                }
+            }
+
+            if (pool_id == common::kInvalidPoolId) {
+                AX_POOL_CONFIG_T pool_config{};
+                pool_config.MetaSize = kEncoderPoolMetaSize;
+                pool_config.BlkCnt = kEncoderPoolBlockCount;
+                pool_config.BlkSize = block_size;
+                pool_config.CacheMode = AX_POOL_CACHE_MODE_NONCACHE;
+                // Partition name must exist in the system CMM partitions (MSP samples use "anonymous").
+                std::snprintf(reinterpret_cast<char*>(pool_config.PartitionName), AX_MAX_PARTITION_NAME_LEN,
+                              "anonymous");
+
+                const auto created_pool = AX_POOL_CreatePool(&pool_config);
+                if (created_pool != AX_INVALID_POOLID) {
+                    pool_id = static_cast<std::uint32_t>(created_pool);
+                    pools_.push_back(PoolEntry{descriptor, block_size, pool_id});
+                }
+            }
+
+            if (pool_id != common::kInvalidPoolId) {
+                common::ImageAllocationOptions alloc{};
+                alloc.memory_type = common::MemoryType::kPool;
+                alloc.cache_mode = common::CacheMode::kNonCached;
+                alloc.alignment = 0x1000;
+                alloc.pool_id = pool_id;
+                alloc.token = token;
+                auto frame = common::AxImage::Create(descriptor, alloc);
+                if (frame) {
+                    return frame;
+                }
+            }
+        }
+    }
+#endif
+
     common::ImageAllocationOptions alloc{};
     alloc.memory_type = common::MemoryType::kCmm;
     alloc.cache_mode = common::CacheMode::kNonCached;
@@ -327,6 +430,13 @@ PreparedInputFrame AxVideoEncoderBase::PrepareInputFrame(const common::AxImage& 
     if (!needs_processing) {
         auto output = AcquireReusableFrame(target, "VideoEncoderInput");
         if (!output || !common::internal::CopyImage(frame, output.get())) {
+            std::fprintf(stderr,
+                         "venc prepare: copy failed fmt=%d %ux%u stride=%zu/%zu phy=%llu blk=0x%x -> %ux%u\n",
+                         static_cast<int>(frame.format()), frame.width(), frame.height(),
+                         frame.stride(0), frame.stride(1),
+                         static_cast<unsigned long long>(frame.physical_address(0)),
+                         frame.block_id(0),
+                         target.width, target.height);
             return {};
         }
         return {std::move(output), true, true};
@@ -334,6 +444,7 @@ PreparedInputFrame AxVideoEncoderBase::PrepareInputFrame(const common::AxImage& 
 
     auto processor = common::CreateImageProcessor();
     if (!processor) {
+        std::fprintf(stderr, "venc prepare: CreateImageProcessor failed (ivps enabled?)\n");
         return {};
     }
 
@@ -342,6 +453,9 @@ PreparedInputFrame AxVideoEncoderBase::PrepareInputFrame(const common::AxImage& 
     if (frame.physical_address(0) == 0) {
         source = AcquireReusableFrame(frame.descriptor(), "VideoEncoderSource");
         if (!source || !common::internal::CopyImage(frame, source.get())) {
+            std::fprintf(stderr,
+                         "venc prepare: acquire/copy host source failed fmt=%d %ux%u\n",
+                         static_cast<int>(frame.format()), frame.width(), frame.height());
             return {};
         }
         source_reusable = true;
@@ -352,8 +466,39 @@ PreparedInputFrame AxVideoEncoderBase::PrepareInputFrame(const common::AxImage& 
     common::ImageProcessRequest request{};
     request.output_image = target;
     request.resize = config_.resize;
+    // Some decoders output padded heights (e.g. 1088 for 1080p). For encode targets matching the logical stream
+    // height, prefer cropping away padding rows instead of scaling, to preserve geometry and quality.
+    if (source &&
+        source->format() == common::PixelFormat::kNv12 &&
+        source->width() == target.width &&
+        source->height() > target.height &&
+        request.enable_crop == false &&
+        request.resize.mode == common::ResizeMode::kStretch) {
+        const auto extra = source->height() - target.height;
+        if (extra > 0 && extra <= 64 && (extra % 2U) == 0U) {
+            request.enable_crop = true;
+            request.crop.x = 0;
+            request.crop.y = 0;
+            request.crop.width = target.width;
+            request.crop.height = target.height;
+        }
+    }
     auto output = AcquireReusableFrame(target, "VideoEncoderInput");
-    if (!output || !processor->Process(*source, request, *output)) {
+    if (!output) {
+        std::fprintf(stderr,
+                     "venc prepare: acquire output failed fmt=%d %ux%u stride=%zu/%zu\n",
+                     static_cast<int>(target.format), target.width, target.height,
+                     target.strides[0], target.strides[1]);
+        if (source_reusable) {
+            RecyclePreparedFrame(std::move(source));
+        }
+        return {};
+    }
+    if (!processor->Process(*source, request, *output)) {
+        std::fprintf(stderr,
+                     "venc prepare: process failed src fmt=%d %ux%u -> dst %ux%u\n",
+                     static_cast<int>(source->format()), source->width(), source->height(),
+                     output->width(), output->height());
         if (source_reusable) {
             RecyclePreparedFrame(std::move(source));
         }
@@ -397,14 +542,14 @@ void AxVideoEncoderBase::SendLoop() {
                     std::lock_guard<std::mutex> lock(staging_mutex_);
                     inflight_frames_.push_back(std::move(prepared.frame));
                 }
-                ReleaseOldInflightFrame();
-            } else if (prepared.hold_for_inflight) {
-                {
-                    std::lock_guard<std::mutex> lock(staging_mutex_);
-                    inflight_hold_frames_.push_back(std::move(prepared.frame));
-                }
-                ReleaseOldInflightFrame();
+            } else {
+                // Keep the original input frame alive for a small inflight window.
+                // Some platforms/drivers do not retain an input buffer reference inside VENC, so releasing
+                // the decoder/pool buffer immediately can cause visible corruption/jitter.
+                std::lock_guard<std::mutex> lock(staging_mutex_);
+                inflight_hold_frames_.push_back(std::move(frame));
             }
+            ReleaseOldInflightFrame();
         } else if (prepared.reusable) {
             RecyclePreparedFrame(std::move(prepared.frame));
         }

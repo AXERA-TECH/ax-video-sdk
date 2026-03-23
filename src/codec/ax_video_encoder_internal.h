@@ -6,6 +6,7 @@
 #include <optional>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include "codec/ax_video_encoder.h"
 
@@ -62,6 +63,12 @@ protected:
     bool stop_requested() const noexcept;
 
 private:
+    struct PoolEntry {
+        common::ImageDescriptor descriptor{};
+        std::uint64_t block_size{0};
+        std::uint32_t pool_id{common::kInvalidPoolId};
+    };
+
     common::AxImage::Ptr AcquireReusableFrame(const common::ImageDescriptor& descriptor, const char* token);
     void RecyclePreparedFrame(common::AxImage::Ptr frame);
     void ReleaseOldInflightFrame();
@@ -95,6 +102,7 @@ private:
     std::deque<common::AxImage::Ptr> reusable_frames_;
     std::deque<common::AxImage::Ptr> inflight_frames_;
     std::deque<common::AxImage::Ptr> inflight_hold_frames_;
+    std::vector<PoolEntry> pools_;
 };
 
 std::unique_ptr<VideoEncoder> CreatePlatformVideoEncoder();

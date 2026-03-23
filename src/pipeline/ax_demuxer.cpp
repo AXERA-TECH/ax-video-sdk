@@ -166,7 +166,7 @@ public:
                 const auto packet_duration_us = ToMicroseconds(packet->duration, video_info_.timescale, video_info_.fps);
                 const auto effective_duration_us =
                     packet_duration_us == 0 ? ResolveFallbackFrameDurationUs() : packet_duration_us;
-                const auto monotonic_packet_pts_us = emitted_pts_cursor_us_;
+                const auto packet_pts_us = ToMicroseconds(packet->pts, video_info_.timescale, video_info_.fps);
 
                 if (config_.realtime_playback) {
                     if (!first_packet_) {
@@ -177,8 +177,10 @@ public:
                 }
 
                 first_packet_ = false;
-                current_loop_span_us_ = monotonic_packet_pts_us + effective_duration_us;
-                packet->pts = packet_pts_offset_us_ + monotonic_packet_pts_us;
+                // Loop bookkeeping uses a monotonic cursor to keep each loop appended in time,
+                // but we preserve the original MP4 packet PTS for correct B-frame reorder in VDEC.
+                current_loop_span_us_ = emitted_pts_cursor_us_ + effective_duration_us;
+                packet->pts = packet_pts_offset_us_ + packet_pts_us;
                 packet->duration = effective_duration_us;
                 emitted_pts_cursor_us_ += effective_duration_us;
                 return true;

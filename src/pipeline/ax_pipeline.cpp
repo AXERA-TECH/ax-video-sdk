@@ -308,7 +308,7 @@ public:
         decoder_->SetFrameCallback([this](common::AxImage::Ptr frame) {
             decoded_frames_.fetch_add(1, std::memory_order_relaxed);
             FanoutFrame(std::move(frame));
-        });
+        }, codec::FrameCallbackMode::kQueue);
         return true;
     }
 

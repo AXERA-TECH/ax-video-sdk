@@ -165,7 +165,7 @@ struct AxImage::Impl {
         plane_sizes.fill(0);
         physical_addresses.fill(0);
         virtual_addresses.fill(nullptr);
-        block_ids.fill(0);
+        block_ids.fill(kInvalidPoolId);
         total_size = 0;
 
         for (std::size_t index = 0; index < plane_count; ++index) {
@@ -187,6 +187,9 @@ struct AxImage::Impl {
         frame.stDynamicRange = AX_DYNAMIC_RANGE_SDR8;
         frame.stColorGamut = AX_COLOR_GAMUT_BT709;
         frame.u32FrameSize = static_cast<AX_U32>(total_size);
+        for (std::size_t index = 0; index < kMaxImagePlanes; ++index) {
+            frame.u32BlkId[index] = AX_INVALID_BLOCKID;
+        }
 
         const auto base_vir = reinterpret_cast<std::uintptr_t>(base_vir_addr);
         for (std::size_t index = 0; index < plane_count; ++index) {

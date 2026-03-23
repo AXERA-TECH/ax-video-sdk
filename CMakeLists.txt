@@ -221,6 +221,10 @@ function(axsdk_configure_internal_tool target)
 
     target_include_directories(${target}
         PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/common
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/codec
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/pipeline
             ${CMAKE_CURRENT_SOURCE_DIR}/third-party
             ${AXSDK_TOOL_EXTRA_INCLUDE_DIRS}
     )
@@ -247,7 +251,8 @@ if(AXSDK_BUILD_SMOKE_TESTS)
     add_executable(ax_decoder_smoke
         tools/ax_decoder_smoke.cpp
     )
-    axsdk_configure_internal_tool(ax_decoder_smoke)
+    # Expose MSP headers to internal smoke tool for debug-only frame metadata access.
+    axsdk_configure_internal_tool(ax_decoder_smoke LINK_AX_MSP)
 
     add_executable(ax_transcode_smoke
         tools/ax_transcode_smoke.cpp
@@ -272,7 +277,8 @@ if(AXSDK_BUILD_SMOKE_TESTS)
     add_executable(ax_system_probe
         tools/ax_system_probe.cpp
     )
-    axsdk_configure_internal_tool(ax_system_probe LINK_AX_MSP)
+    # This tool calls AX_* symbols directly, so it must link the MSP libs explicitly.
+    axsdk_configure_internal_tool(ax_system_probe LINK_AX_MSP EXTRA_LIBRARIES ${AXSDK_COMMON_LIBS})
 
     add_executable(ax_jpeg_smoke
         tools/ax_jpeg_smoke.cpp
