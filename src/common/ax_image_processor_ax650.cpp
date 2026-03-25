@@ -112,6 +112,45 @@ AX_U64 ComputeImageByteSize(const ImageDescriptor& descriptor) noexcept {
     return total_size;
 }
 
+bool MakeAlignedDescriptor(PixelFormat format,
+                           std::uint32_t width,
+                           std::uint32_t height,
+                           ImageDescriptor* descriptor) noexcept {
+    if (descriptor == nullptr) {
+        return false;
+    }
+
+    ImageDescriptor out{};
+    out.format = format;
+    out.width = width;
+    out.height = height;
+
+    if (out.width == 0 || out.height == 0) {
+        return false;
+    }
+
+    const auto min_stride = MinStrideForFormat(out.format, out.width);
+    if (min_stride == 0) {
+        return false;
+    }
+
+    const auto stride_alignment =
+        (out.format == PixelFormat::kRgb24 || out.format == PixelFormat::kBgr24)
+            ? (kDefaultStrideAlignment * 3U)  // 16 pixels (48 bytes) to keep RGB stride % 3 == 0.
+            : kDefaultStrideAlignment;
+    out.strides[0] = AlignUp(min_stride, stride_alignment);
+
+    if (out.format == PixelFormat::kNv12) {
+        if ((out.width % 2U) != 0U || (out.height % 2U) != 0U) {
+            return false;
+        }
+        out.strides[1] = out.strides[0];
+    }
+
+    *descriptor = out;
+    return out.strides[0] >= min_stride;
+}
+
 bool ValidateCrop(const AxImage& source, const ImageProcessRequest& request) noexcept {
     if (!request.enable_crop) {
         return true;
@@ -351,16 +390,61 @@ public:
             }
 
             const auto aspect_ratio = MakeAspectRatio(request);
-            if (request.resize.mode == ResizeMode::kKeepAspectRatio &&
-                !FillBackground(destination, request.resize.background_color)) {
-                std::fprintf(stderr, "ax650 image processor: fill background failed fmt=%d size=%ux%u\n",
-                             static_cast<int>(destination.format()), destination.width(), destination.height());
-                return false;
-            }
-            if (!request.enable_crop && source.width() == destination.width() && source.height() == destination.height()) {
-                ret = AX_IVPS_CscVpp(&src_frame_for_processing, dst_frame);
-            } else {
+            const bool needs_geometry_change =
+                request.enable_crop || source.width() != destination.width() || source.height() != destination.height();
+            const bool needs_format_change = source.format() != destination.format();
+
+            if (!needs_geometry_change && needs_format_change) {
+                // For packed RGB/BGR, AX650 MSP samples consistently use the TDP path.
+                // Some MSP versions show corruption when using VPP CSC for RGB/BGR.
+                ret = AX_IVPS_CscTdp(&src_frame_for_processing, dst_frame);
+            } else if (!needs_format_change) {
+                if (request.resize.mode == ResizeMode::kKeepAspectRatio &&
+                    !FillBackground(destination, request.resize.background_color)) {
+                    std::fprintf(stderr, "ax650 image processor: fill background failed fmt=%d size=%ux%u\n",
+                                 static_cast<int>(destination.format()), destination.width(), destination.height());
+                    return false;
+                }
+
+                // Same format: CropResizeVpp handles crop/resize.
                 ret = AX_IVPS_CropResizeVpp(&src_frame_for_processing, dst_frame, &aspect_ratio);
+            } else {
+                // AX650 IVPS CropResizeVpp does not reliably support simultaneous resize and color conversion.
+                // Stage it: resize in source format -> CSC to destination format.
+                ImageDescriptor intermediate_desc{};
+                if (!MakeAlignedDescriptor(source.format(), destination.width(), destination.height(), &intermediate_desc)) {
+                    std::fprintf(stderr,
+                                 "ax650 image processor: make intermediate descriptor failed src_fmt=%d dst_fmt=%d size=%ux%u\n",
+                                 static_cast<int>(source.format()), static_cast<int>(destination.format()),
+                                 destination.width(), destination.height());
+                    return false;
+                }
+
+                auto intermediate = AcquireIntermediate(intermediate_desc);
+                if (!intermediate) {
+                    std::fprintf(stderr, "ax650 image processor: allocate intermediate failed fmt=%d size=%ux%u\n",
+                                 static_cast<int>(intermediate_desc.format),
+                                 intermediate_desc.width,
+                                 intermediate_desc.height);
+                    return false;
+                }
+
+                if (request.resize.mode == ResizeMode::kKeepAspectRatio &&
+                    !FillBackground(*intermediate, request.resize.background_color)) {
+                    std::fprintf(stderr, "ax650 image processor: fill intermediate background failed fmt=%d size=%ux%u\n",
+                                 static_cast<int>(intermediate->format()), intermediate->width(), intermediate->height());
+                    return false;
+                }
+
+                auto* intermediate_frame = AxImageAccess::MutableAxFrame(intermediate.get());
+                if (intermediate_frame == nullptr) {
+                    return false;
+                }
+
+                ret = AX_IVPS_CropResizeVpp(&src_frame_for_processing, intermediate_frame, &aspect_ratio);
+                if (ret == AX_SUCCESS) {
+                    ret = AX_IVPS_CscTdp(intermediate_frame, dst_frame);
+                }
             }
         }
 
@@ -376,6 +460,25 @@ public:
     }
 
 private:
+    common::AxImage::Ptr AcquireIntermediate(const common::ImageDescriptor& descriptor) {
+        if (intermediate_ &&
+            intermediate_->format() == descriptor.format &&
+            intermediate_->width() == descriptor.width &&
+            intermediate_->height() == descriptor.height &&
+            intermediate_->stride(0) == descriptor.strides[0] &&
+            (descriptor.format != PixelFormat::kNv12 || intermediate_->stride(1) == descriptor.strides[1])) {
+            return intermediate_;
+        }
+
+        ImageAllocationOptions options{};
+        options.memory_type = MemoryType::kCmm;
+        options.cache_mode = CacheMode::kNonCached;
+        options.alignment = 0x1000;
+        options.token = "AxImageProcessorIntermediate";
+        intermediate_ = AxImage::Create(descriptor, options);
+        return intermediate_;
+    }
+
     struct PoolHandle {
         explicit PoolHandle(AX_POOL pool_id) noexcept : id(pool_id) {}
 
@@ -429,6 +532,7 @@ private:
 
     std::mutex pool_mutex_;
     std::vector<PoolEntry> pools_;
+    common::AxImage::Ptr intermediate_;
 };
 
 }  // namespace
