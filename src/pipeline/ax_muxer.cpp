@@ -6,6 +6,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -39,6 +40,51 @@ std::uint32_t ResolveRtspFps(const codec::VideoStreamInfo& stream) noexcept {
     const double fps = stream.frame_rate > 0.0 ? stream.frame_rate : 30.0;
     return static_cast<std::uint32_t>(std::lround(fps));
 }
+
+class RtspPtsUnwrapper {
+public:
+    explicit RtspPtsUnwrapper(double fps) noexcept
+        : step_us_(ResolveStepUs(fps)) {}
+
+    std::uint64_t ToMonotonicPtsMs(std::uint64_t pts_us) noexcept {
+        const std::uint64_t in_us = pts_us;
+        if (!last_out_us_.has_value()) {
+            last_out_us_ = in_us;
+            return RoundToMs(in_us);
+        }
+
+        // VENC may emit packets in coding order with PTS that occasionally goes backwards
+        // (B-frames) or discontinuities (loop playback). Some RTSP clients (ffmpeg/ffplay)
+        // will tear down the connection when RTP timestamps are non-monotonic. Convert PTS
+        // to a monotonically increasing timeline for RTP timestamping.
+        std::uint64_t candidate = in_us + offset_us_;
+        const std::uint64_t min_next = last_out_us_.value() + step_us_;
+        if (candidate < min_next) {
+            offset_us_ = min_next > in_us ? (min_next - in_us) : 0U;
+            candidate = in_us + offset_us_;
+        }
+
+        last_out_us_ = candidate;
+        return RoundToMs(candidate);
+    }
+
+private:
+    static std::uint64_t ResolveStepUs(double fps) noexcept {
+        if (fps <= 0.0) {
+            return 33333ULL;
+        }
+        const auto step = static_cast<std::uint64_t>(std::llround(1000000.0 / fps));
+        return step == 0 ? 1ULL : step;
+    }
+
+    static std::uint64_t RoundToMs(std::uint64_t us) noexcept {
+        return (us + 500ULL) / 1000ULL;
+    }
+
+    std::optional<std::uint64_t> last_out_us_{};
+    std::uint64_t offset_us_{0};
+    std::uint64_t step_us_{33333};
+};
 
 class PacketSink {
 public:
@@ -100,7 +146,8 @@ public:
                    codec::VideoStreamInfo stream)
         : server_(std::move(server)),
           rtsp_target_(std::move(target)),
-          stream_(stream) {}
+          stream_(stream),
+          pts_unwrapper_(stream.frame_rate) {}
 
     ~RtspServerSink() override {
         Close();
@@ -122,7 +169,7 @@ public:
 
         const auto packet_codec =
             packet.codec == codec::VideoCodecType::kUnknown ? stream_.codec : packet.codec;
-        const auto pts_ms = packet.pts / 1000ULL;
+        const auto pts_ms = pts_unwrapper_.ToMonotonicPtsMs(packet.pts);
         if (packet_codec == codec::VideoCodecType::kH265) {
             return server_->pushH265Data(rtsp_target_.path, packet.data.data(), packet.data.size(), pts_ms,
                                          packet.key_frame);
@@ -138,13 +185,15 @@ private:
     std::shared_ptr<rtsp::RtspServer> server_;
     internal::RtspUrlTarget rtsp_target_{};
     codec::VideoStreamInfo stream_{};
+    RtspPtsUnwrapper pts_unwrapper_;
 };
 
 class RtspPublisherSink final : public PacketSink {
 public:
     RtspPublisherSink(codec::VideoStreamInfo stream, std::string publisher_url)
         : stream_(stream),
-          publisher_url_(std::move(publisher_url)) {
+          publisher_url_(std::move(publisher_url)),
+          pts_unwrapper_(stream.frame_rate) {
         rtsp::RtspPublishConfig publisher_config{};
         publisher_config.local_rtp_port = 0;
         publisher_.setConfig(publisher_config);
@@ -200,7 +249,7 @@ public:
             }
         }
 
-        const auto pts_ms = packet.pts / 1000ULL;
+        const auto pts_ms = pts_unwrapper_.ToMonotonicPtsMs(packet.pts);
         return packet_codec == codec::VideoCodecType::kH265
                    ? publisher_.pushH265Data(packet.data.data(), packet.data.size(), pts_ms, packet.key_frame)
                    : publisher_.pushH264Data(packet.data.data(), packet.data.size(), pts_ms, packet.key_frame);
@@ -210,6 +259,7 @@ private:
     codec::VideoStreamInfo stream_{};
     rtsp::RtspPublisher publisher_;
     std::string publisher_url_;
+    RtspPtsUnwrapper pts_unwrapper_;
     std::vector<std::uint8_t> output_vps_;
     std::vector<std::uint8_t> output_sps_;
     std::vector<std::uint8_t> output_pps_;

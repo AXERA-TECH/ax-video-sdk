@@ -255,7 +255,10 @@ public:
             }
         }
 
-        return destination.InvalidateCache() && axclrtSynchronizeDevice() == AXCL_SUCC;
+        // AXCL_IVPS_* APIs are synchronous enough for downstream device consumers (e.g. NPU/VENC).
+        // Avoid axclrtSynchronizeDevice here: it's a device-wide barrier and will wait for unrelated
+        // codec/ivps workloads, which can severely reduce throughput.
+        return destination.InvalidateCache();
     }
 
 private:
