@@ -8,6 +8,7 @@ fi
 
 CHIP="$1"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOST_ARCH="$(uname -m)"
 
 case "${CHIP}" in
     ax650)
@@ -67,6 +68,14 @@ case "${CHIP}" in
         COMPILER_CHECK="aarch64-none-linux-gnu-g++"
         AXCL_ARCH="aarch64"
         AXCL_SUBDIR_NAME="axcl_linux_arm64"
+
+        # Native build on an aarch64 host (e.g. Raspberry Pi):
+        # do NOT use the x86_64 cross toolchain path by default.
+        if [[ "${HOST_ARCH}" == "aarch64" || "${HOST_ARCH}" == "arm64" ]]; then
+            TOOLCHAIN_FILE=""
+            DEFAULT_TOOLCHAIN_BIN=""
+            COMPILER_CHECK="g++"
+        fi
         ;;
     *)
         echo "unsupported chip: ${CHIP}" >&2

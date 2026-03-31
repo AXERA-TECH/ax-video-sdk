@@ -32,43 +32,13 @@ namespace {
 constexpr std::size_t kRgbChannels = 3;
 
 AX_U32 ToAxPicStride(PixelFormat format, std::size_t byte_stride) noexcept {
-    // NOTE:
-    // AX SDK (MSP on-device) samples treat AX_VIDEO_FRAME_T::u32PicStride for packed RGB/BGR as **pixels**.
-    // But AXCL (PCIe cards) IVPS implementations behave as if u32PicStride is **bytes-per-line**.
-    //
-    // We keep AxImage descriptor strides in **bytes-per-line** and translate here per platform.
-#if defined(AXSDK_PLATFORM_AXCL)
     (void)format;
     return static_cast<AX_U32>(byte_stride);
-#else
-    switch (format) {
-    case PixelFormat::kRgb24:
-    case PixelFormat::kBgr24:
-        return static_cast<AX_U32>(byte_stride / kRgbChannels);
-    case PixelFormat::kNv12:
-    case PixelFormat::kUnknown:
-    default:
-        return static_cast<AX_U32>(byte_stride);
-    }
-#endif
 }
 
 std::size_t FromAxPicStride(PixelFormat format, AX_U32 pic_stride) noexcept {
-    // See ToAxPicStride(): convert platform pic-stride back to bytes-per-line.
-#if defined(AXSDK_PLATFORM_AXCL)
     (void)format;
     return static_cast<std::size_t>(pic_stride);
-#else
-    switch (format) {
-    case PixelFormat::kRgb24:
-    case PixelFormat::kBgr24:
-        return static_cast<std::size_t>(pic_stride) * kRgbChannels;
-    case PixelFormat::kNv12:
-    case PixelFormat::kUnknown:
-    default:
-        return static_cast<std::size_t>(pic_stride);
-    }
-#endif
 }
 
 std::size_t PlaneCountForFormat(PixelFormat format) noexcept {

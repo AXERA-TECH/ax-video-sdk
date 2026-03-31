@@ -49,18 +49,26 @@
 
 ## 目录说明
 
-- [include](/home/axera/ax_video_sdk/include)
+- [include](include)
   对外头文件
-- [src](/home/axera/ax_video_sdk/src)
+- [src](src)
   核心实现
-- [tools](/home/axera/ax_video_sdk/tools)
+- [tools](tools)
   内部测试工具、smoke 工具
-- [third-party](/home/axera/ax_video_sdk/third-party)
+- [third-party](third-party)
   第三方依赖
-- [toolchains](/home/axera/ax_video_sdk/toolchains)
+- [toolchains](toolchains)
   CMake toolchain 文件
-- [design](/home/axera/ax_video_sdk/design)
+- [docs](docs)
+  API 文档
+- [design](design)
   设计文档、测试记录
+
+## 文档
+
+API 文档入口:
+
+- [docs/README.md](docs/README.md)
 
 ## 本地构建
 
