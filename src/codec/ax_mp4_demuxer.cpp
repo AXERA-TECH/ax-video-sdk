@@ -546,7 +546,7 @@ std::unique_ptr<Mp4FileMuxer> Mp4FileMuxer::Open(const std::string& file_path, c
         return nullptr;
     }
 
-    impl->mux = MP4E_open(1, 0, impl->file, WriteToFile);
+    impl->mux = MP4E_open(1, 1, impl->file, WriteToFile);
     if (impl->mux == nullptr) {
         std::fclose(impl->file);
         return nullptr;
