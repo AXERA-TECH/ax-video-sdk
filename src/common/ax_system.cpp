@@ -470,11 +470,9 @@ bool EnsureAxclThreadContext(int device_id) noexcept {
     }
 
     if (thread_context.context != nullptr && thread_context.device_id == resolved_device_id) {
-        // Avoid spamming context bind logs when already current.
-        axclrtContext current = nullptr;
-        if (axclrtGetCurrentContext(&current) == AXCL_SUCC && current == thread_context.context) {
-            return true;
-        }
+        // NOTE: axclrtGetCurrentContext logs an error when the thread has no current context.
+        // This can happen if other modules temporarily bind/destroy their own contexts.
+        // Always (re-)bind here to keep logs clean and avoid false alarms at shutdown.
         (void)axclrtSetCurrentContext(thread_context.context);
         return true;
     }
