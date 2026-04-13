@@ -140,6 +140,8 @@ add_library(ax_video_sdk ${AXSDK_LIBRARY_TYPE}
     src/pipeline/ax_muxer.cpp
     src/pipeline/ax_pipeline.cpp
     src/pipeline/ax_pipeline_manager.cpp
+    src/pipeline/ax_v4l2_capture.cpp
+    src/pipeline/ax_camera_pipeline.cpp
 )
 
 if(AXSDK_CHIP_TYPE_NORMALIZED STREQUAL "ax650")

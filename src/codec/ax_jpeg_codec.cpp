@@ -370,7 +370,7 @@ common::AxImage::Ptr DecodeJpegBytes(const std::uint8_t* bytes,
     decode_param.stStream.pu8Addr = static_cast<AX_U8*>(stream_cpu_vir_addr);
     decode_param.stStream.u32StreamPackLen = static_cast<AX_U32>(size);
     decode_param.stFrame = *native_frame;
-#if defined(AXSDK_CHIP_AX650)
+#if defined(AXSDK_CHIP_AX650) || defined(AXSDK_PLATFORM_AXCL)
     decode_param.enOutputMode = AX_VDEC_OUTPUT_ORIGINAL;
     decode_param.enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR;
 #endif
