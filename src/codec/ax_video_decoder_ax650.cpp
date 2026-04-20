@@ -20,6 +20,7 @@ constexpr AX_S32 kAxWaitMs = 100;
 constexpr AX_VDEC_CHN kOutputChannel = 0;
 constexpr AX_U32 kFrameBufferCount = 8;
 constexpr AX_U32 kFrameBufferCountH264 = 32;
+constexpr AX_U32 kOutputFifoDepth = 5;
 
 AX_PAYLOAD_TYPE_E ToAxPayload(VideoCodecType codec) noexcept {
     switch (codec) {
@@ -73,7 +74,8 @@ protected:
         group_attr.u32StreamBufSize = ResolveStreamBufferSize(video_info);
         group_attr.bSdkAutoFramePool = AX_TRUE;
         group_attr.bSkipSdkStreamPool = AX_FALSE;
-        group_attr.u32RefNum = video_info.codec == VideoCodecType::kH264 ? 8 : 2;
+        // Match MSP sample defaults: let VDEC decide reference buffer count.
+        group_attr.u32RefNum = 0;
 
         if (AX_VDEC_CreateGrpEx(&group_, &group_attr) != AX_SUCCESS) {
             group_ = -1;
@@ -84,7 +86,7 @@ protected:
         channel_attr.u32PicWidth = aligned_width;
         channel_attr.u32PicHeight = aligned_height;
         channel_attr.u32FrameStride = ResolveFrameStride(aligned_width);
-        channel_attr.u32OutputFifoDepth = 3;
+        channel_attr.u32OutputFifoDepth = kOutputFifoDepth;
         channel_attr.u32FrameBufCnt = frame_buffer_count;
         channel_attr.enOutputMode = AX_VDEC_OUTPUT_ORIGINAL;
         channel_attr.enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR;

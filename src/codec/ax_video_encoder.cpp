@@ -42,7 +42,13 @@ constexpr std::size_t kEncoderReusableInflightDepth = 7;  // our own pool-backed
 constexpr std::size_t kEncoderHoldInflightDepth = 12;     // decoder-backed frames (alias path)
 #else
 constexpr std::size_t kEncoderReusableInflightDepth = 4;
+#if defined(AXSDK_CHIP_AX650)
+// AX650: under offline playback, VENC may keep referencing input frames beyond the HW FIFO depth.
+// Keep a deeper inflight window to avoid releasing CMM buffers too early (can crash inside libax_venc).
+constexpr std::size_t kEncoderHoldInflightDepth = 16;
+#else
 constexpr std::size_t kEncoderHoldInflightDepth = 4;
+#endif
 #endif
 
 #if defined(AXSDK_CHIP_AX620E_FAMILY)
