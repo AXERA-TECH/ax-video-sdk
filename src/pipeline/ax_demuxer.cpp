@@ -325,8 +325,11 @@ private:
     }
 
     void CloseRtspSession() noexcept {
-        rtsp_client_.interrupt();
-        (void)rtsp_client_.closeWithTimeout(2000);
+        // Avoid spamming RTSP close logs for non-RTSP inputs (local MP4) where the client was never connected.
+        if (rtsp_client_.isConnected() || rtsp_client_.isPlaying()) {
+            rtsp_client_.interrupt();
+            (void)rtsp_client_.closeWithTimeout(2000);
+        }
         rtsp_session_ = {};
         rtsp_decoder_prefix_.clear();
         rtsp_decoder_config_sent_ = false;

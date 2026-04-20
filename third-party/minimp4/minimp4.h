@@ -2549,10 +2549,10 @@ static void my_fseek(MP4D_demux_t *mp4, boxsize_t pos, int *eof_flag)
 
 typedef enum { BOX_ATOM, BOX_OD } boxtype_t;
 
-int MP4D_open(MP4D_demux_t *mp4, int (*read_callback)(int64_t offset, void *buffer, size_t size, void *token), void *token, int64_t file_size)
-{
-    // box stack size
-    int depth = 0;
+	int MP4D_open(MP4D_demux_t *mp4, int (*read_callback)(int64_t offset, void *buffer, size_t size, void *token), void *token, int64_t file_size)
+	{
+	    // box stack size
+	    int depth = 0;
 
     struct
     {
@@ -2584,16 +2584,33 @@ int MP4D_open(MP4D_demux_t *mp4, int (*read_callback)(int64_t offset, void *buff
     mp4->token = token;
     mp4->read_size = file_size;
 
-    stack[0].format = BOX_ATOM;   // start with atom box
-    stack[0].bytes = 0;           // never accessed
+	    stack[0].format = BOX_ATOM;   // start with atom box
+	    stack[0].bytes = 0;           // never accessed
 
-    do
-    {
-        // List of boxes, derived from 'FullBox'
-        //                ~~~~~~~~~~~~~~~~~~~~~
-        // need read version field and check version for these boxes
-        static const struct
-        {
+	    do
+	    {
+	        // Some MP4/MOV files (notably certain QuickTime exports) may contain trailing padding
+	        // inside container boxes. If fewer than 8 bytes remain, we cannot read a valid box
+	        // header (size+type). Skip the padding and pop the box to avoid underflow/EOF issues.
+	        while (depth > 0 && stack[depth].format == BOX_ATOM &&
+	               stack[depth].bytes > 0 && stack[depth].bytes < 8)
+	        {
+	            my_fseek(mp4, stack[depth].bytes, &eof_flag);
+	            stack[depth].bytes = 0;
+	            depth--;
+	        }
+	        // If we popped boxes (or an earlier iteration ended exactly on a box boundary),
+	        // pop any now-empty parents before attempting to read the next header.
+	        while (depth > 0 && !stack[depth].bytes)
+	        {
+	            depth--;
+	        }
+
+	        // List of boxes, derived from 'FullBox'
+	        //                ~~~~~~~~~~~~~~~~~~~~~
+	        // need read version field and check version for these boxes
+	        static const struct
+	        {
             uint32_t name;
             unsigned max_version;
             unsigned use_track_flag;
