@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -106,6 +107,12 @@ public:
         if (rects_.empty()) {
             return true;
         }
+
+        // AXCL IVPS draw APIs are not guaranteed to be thread-safe across multiple pipelines.
+        // Serialize draw calls to avoid sporadic failures under multi-stream load.
+        static std::mutex g_draw_mutex;
+        std::lock_guard<std::mutex> lock(g_draw_mutex);
+
         if (!image.InvalidateCache()) {
             return false;
         }
