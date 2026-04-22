@@ -8,11 +8,16 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include <rtsp-publisher/rtsp_publisher.h>
 #include <rtsp-server/rtsp_server.h>
+
+#if defined(RTSP_SDK_WITH_ONVIF) && RTSP_SDK_WITH_ONVIF
+#include <rtsp-onvif/rtsp-onvif.h>
+#endif
 
 #include "ax_mp4_internal.h"
 #include "ax_rtsp_internal.h"
@@ -40,6 +45,87 @@ std::uint32_t ResolveRtspFps(const codec::VideoStreamInfo& stream) noexcept {
     const double fps = stream.frame_rate > 0.0 ? stream.frame_rate : 30.0;
     return static_cast<std::uint32_t>(std::lround(fps));
 }
+
+#if defined(RTSP_SDK_WITH_ONVIF) && RTSP_SDK_WITH_ONVIF
+struct OnvifServerEntry {
+    std::shared_ptr<rtsp::RtspServer> server;
+    std::unique_ptr<rtsp::OnvifDaemon> daemon;
+    std::uint16_t http_port{0};
+};
+
+std::mutex g_onvif_mutex;
+std::unordered_map<std::uint16_t, OnvifServerEntry> g_onvif_servers;
+
+std::vector<std::uint16_t> BuildOnvifHttpPortCandidates(std::uint16_t rtsp_port) {
+    std::vector<std::uint16_t> ports;
+    auto add_port = [&ports](std::uint16_t port) {
+        if (port == 0) {
+            return;
+        }
+        if (std::find(ports.begin(), ports.end(), port) != ports.end()) {
+            return;
+        }
+        ports.push_back(port);
+    };
+
+    if (rtsp_port < 65535U) {
+        add_port(static_cast<std::uint16_t>(rtsp_port + 1U));
+    }
+    add_port(8080);
+    if (rtsp_port <= 65435U) {
+        add_port(static_cast<std::uint16_t>(rtsp_port + 100U));
+    }
+
+    return ports;
+}
+
+void EnsureOnvifDaemonRunning(const std::shared_ptr<rtsp::RtspServer>& server,
+                             const internal::RtspUrlTarget& target) {
+    if (!server) {
+        return;
+    }
+
+    const std::uint16_t rtsp_port = target.port;
+    std::lock_guard<std::mutex> lock(g_onvif_mutex);
+
+    auto& entry = g_onvif_servers[rtsp_port];
+    if (entry.daemon && entry.daemon->isRunning()) {
+        return;
+    }
+
+    entry = {};
+    entry.server = server;
+
+    rtsp::OnvifDaemonConfig cfg{};
+    cfg.rtsp_port = rtsp_port;
+    cfg.device_info.manufacturer = "AXERA";
+    cfg.device_info.model = "ax-pipeline";
+    cfg.device_info.firmware = "ax-video-sdk";
+    cfg.device_info.serial = "rtsp-" + std::to_string(rtsp_port);
+    cfg.device_info.hardware_id = "ax";
+
+    const bool has_explicit_host =
+        !target.host.empty() && target.host != "0.0.0.0" && target.host != "::";
+    if (has_explicit_host) {
+        cfg.announce_host = target.host;
+        cfg.announce_rtsp_host = target.host;
+    }
+
+    for (const auto port : BuildOnvifHttpPortCandidates(rtsp_port)) {
+        auto daemon = std::make_unique<rtsp::OnvifDaemon>();
+        cfg.http_port = port;
+        daemon->attachServer(entry.server.get());
+        daemon->setConfig(cfg);
+        if (daemon->start()) {
+            entry.http_port = port;
+            entry.daemon = std::move(daemon);
+            return;
+        }
+    }
+
+    entry.server.reset();
+}
+#endif
 
 class RtspPtsUnwrapper {
 public:
@@ -309,6 +395,9 @@ std::unique_ptr<PacketSink> OpenRtspSink(const codec::VideoStreamInfo& stream, c
 
         if (server->addPath(path_config)) {
             if (server->isRunning() || server->start()) {
+#if defined(RTSP_SDK_WITH_ONVIF) && RTSP_SDK_WITH_ONVIF
+                EnsureOnvifDaemonRunning(server, target);
+#endif
                 return std::make_unique<RtspServerSink>(std::move(server), std::move(target), stream);
             }
             server->removePath(target.path);
