@@ -341,7 +341,6 @@ bool FillBackground(AxImage& image, std::uint32_t rgb) noexcept {
 
 bool SameGeometryAndFormat(const AxImage& source, const AxImage& destination, const ImageProcessRequest& request) noexcept {
     return !request.enable_crop &&
-           request.resize.mode == ResizeMode::kStretch &&
            source.format() == destination.format() &&
            source.width() == destination.width() &&
            source.height() == destination.height() &&
@@ -389,8 +388,13 @@ public:
             return false;
         }
 
-        // IVPS is not reliably thread-safe across MSP versions; serialize in-process.
-        std::lock_guard<std::mutex> ivps_lock(common::internal::IvpsGlobalMutex());
+        // IVPS is not reliably thread-safe across MSP versions; allow optional in-process serialization.
+        // For maximum throughput, serialization is disabled by default.
+        // If you hit instability on a specific MSP/driver version, set AXVSDK_IVPS_SERIALIZE=1 (or AXP_IVPS_SERIALIZE=1).
+        std::unique_lock<std::mutex> ivps_lock(common::internal::IvpsGlobalMutex(), std::defer_lock);
+        if (common::internal::IvpsSerializeEnabled()) {
+            ivps_lock.lock();
+        }
 
         ImageDescriptor expected_output{};
         if (!ResolveOutputDescriptor(source, request, &expected_output)) {

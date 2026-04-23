@@ -1,9 +1,12 @@
 #include "ax_image_processor_internal.h"
 
+#include <atomic>
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <mutex>
 #include <vector>
@@ -22,6 +25,189 @@ namespace {
 constexpr std::size_t kDefaultStrideAlignment = 16;
 constexpr AX_U32 kProcessorPoolBlockCount = 24;
 constexpr AX_U64 kProcessorPoolMetaSize = 512;
+
+enum class IvpsEngine {
+    kTdp,
+    kVpp,
+    kVgp,
+};
+
+struct IvpsDispatchConfig {
+    bool round_robin{false};
+    IvpsEngine engines[3]{IvpsEngine::kVpp, IvpsEngine::kVpp, IvpsEngine::kVpp};
+    std::size_t engine_count{1};
+    IvpsEngine fixed{IvpsEngine::kVpp};
+};
+
+bool StartsWithNoCase(const char* s, const char* prefix) noexcept {
+    if (s == nullptr || prefix == nullptr) {
+        return false;
+    }
+    while (*prefix != '\0') {
+        if (*s == '\0') {
+            return false;
+        }
+        const auto a = static_cast<unsigned char>(*s++);
+        const auto b = static_cast<unsigned char>(*prefix++);
+        if (std::tolower(a) != std::tolower(b)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+IvpsDispatchConfig ParseCropResizeDispatch() noexcept {
+    // Default: spread resize across VPP + VGP.
+    IvpsDispatchConfig cfg{};
+    cfg.round_robin = true;
+    cfg.engines[0] = IvpsEngine::kVpp;
+    cfg.engines[1] = IvpsEngine::kVgp;
+    cfg.engine_count = 2;
+    cfg.fixed = IvpsEngine::kVpp;
+
+    const char* v = std::getenv("AXVSDK_IVPS_CROPRESIZE_ENGINE");
+    if (v == nullptr || *v == '\0') {
+        v = std::getenv("AXP_IVPS_CROPRESIZE_ENGINE");
+    }
+    if (v == nullptr || *v == '\0') {
+        return cfg;
+    }
+
+    if (StartsWithNoCase(v, "vpp")) {
+        cfg.round_robin = false;
+        cfg.fixed = IvpsEngine::kVpp;
+        return cfg;
+    }
+    if (StartsWithNoCase(v, "tdp")) {
+        cfg.round_robin = false;
+        cfg.fixed = IvpsEngine::kTdp;
+        return cfg;
+    }
+    if (StartsWithNoCase(v, "vgp")) {
+        cfg.round_robin = false;
+        cfg.fixed = IvpsEngine::kVgp;
+        return cfg;
+    }
+    if (StartsWithNoCase(v, "rr_all") || StartsWithNoCase(v, "all")) {
+        cfg.round_robin = true;
+        cfg.engines[0] = IvpsEngine::kVpp;
+        cfg.engines[1] = IvpsEngine::kTdp;
+        cfg.engines[2] = IvpsEngine::kVgp;
+        cfg.engine_count = 3;
+        return cfg;
+    }
+    if (StartsWithNoCase(v, "rr") || StartsWithNoCase(v, "auto")) {
+        // Keep default (VPP + VGP).
+        return cfg;
+    }
+    return cfg;
+}
+
+IvpsDispatchConfig ParseCscDispatch() noexcept {
+    // Default: spread CSC across TDP + VGP. Fallback to TDP on failure.
+    IvpsDispatchConfig cfg{};
+    cfg.round_robin = true;
+    cfg.engines[0] = IvpsEngine::kTdp;
+    cfg.engines[1] = IvpsEngine::kVgp;
+    cfg.engine_count = 2;
+    cfg.fixed = IvpsEngine::kTdp;
+
+    const char* v = std::getenv("AXVSDK_IVPS_CSC_ENGINE");
+    if (v == nullptr || *v == '\0') {
+        v = std::getenv("AXP_IVPS_CSC_ENGINE");
+    }
+    if (v == nullptr || *v == '\0') {
+        return cfg;
+    }
+
+    if (StartsWithNoCase(v, "tdp")) {
+        cfg.round_robin = false;
+        cfg.fixed = IvpsEngine::kTdp;
+        return cfg;
+    }
+    if (StartsWithNoCase(v, "vpp")) {
+        cfg.round_robin = false;
+        cfg.fixed = IvpsEngine::kVpp;
+        return cfg;
+    }
+    if (StartsWithNoCase(v, "vgp")) {
+        cfg.round_robin = false;
+        cfg.fixed = IvpsEngine::kVgp;
+        return cfg;
+    }
+    if (StartsWithNoCase(v, "rr_all") || StartsWithNoCase(v, "all")) {
+        cfg.round_robin = true;
+        cfg.engines[0] = IvpsEngine::kTdp;
+        cfg.engines[1] = IvpsEngine::kVgp;
+        cfg.engines[2] = IvpsEngine::kVpp;
+        cfg.engine_count = 3;
+        return cfg;
+    }
+    if (StartsWithNoCase(v, "rr") || StartsWithNoCase(v, "auto")) {
+        // Keep default (TDP + VGP).
+        return cfg;
+    }
+    return cfg;
+}
+
+IvpsEngine SelectEngine(const IvpsDispatchConfig& cfg, std::atomic<std::uint32_t>* rr) noexcept {
+    if (!cfg.round_robin || rr == nullptr || cfg.engine_count <= 1) {
+        return cfg.fixed;
+    }
+    const auto idx = rr->fetch_add(1U, std::memory_order_relaxed);
+    return cfg.engines[idx % cfg.engine_count];
+}
+
+AX_S32 IvpsCropResize(IvpsEngine engine,
+                      const AX_VIDEO_FRAME_T* src,
+                      AX_VIDEO_FRAME_T* dst,
+                      const AX_IVPS_ASPECT_RATIO_T* aspect_ratio) noexcept {
+    switch (engine) {
+    case IvpsEngine::kTdp:
+        return AX_IVPS_CropResizeTdp(src, dst, aspect_ratio);
+    case IvpsEngine::kVgp:
+        return AX_IVPS_CropResizeVgp(src, dst, aspect_ratio);
+    case IvpsEngine::kVpp:
+    default:
+        return AX_IVPS_CropResizeVpp(src, dst, aspect_ratio);
+    }
+}
+
+AX_S32 IvpsCsc(IvpsEngine engine, const AX_VIDEO_FRAME_T* src, AX_VIDEO_FRAME_T* dst) noexcept {
+    switch (engine) {
+    case IvpsEngine::kVpp:
+        return AX_IVPS_CscVpp(src, dst);
+    case IvpsEngine::kVgp:
+        return AX_IVPS_CscVgp(src, dst);
+    case IvpsEngine::kTdp:
+    default:
+        return AX_IVPS_CscTdp(src, dst);
+    }
+}
+
+AX_S32 CropResizeDispatched(const AX_VIDEO_FRAME_T* src,
+                            AX_VIDEO_FRAME_T* dst,
+                            const AX_IVPS_ASPECT_RATIO_T* aspect_ratio) noexcept {
+    static const IvpsDispatchConfig cfg = ParseCropResizeDispatch();
+    static std::atomic<std::uint32_t> rr{0};
+    const IvpsEngine engine = SelectEngine(cfg, &rr);
+    AX_S32 ret = IvpsCropResize(engine, src, dst, aspect_ratio);
+    if (ret != AX_SUCCESS && engine != IvpsEngine::kVpp) {
+        ret = IvpsCropResize(IvpsEngine::kVpp, src, dst, aspect_ratio);
+    }
+    return ret;
+}
+
+AX_S32 CscDispatched(const AX_VIDEO_FRAME_T* src, AX_VIDEO_FRAME_T* dst) noexcept {
+    static const IvpsDispatchConfig cfg = ParseCscDispatch();
+    static std::atomic<std::uint32_t> rr{0};
+    const IvpsEngine engine = SelectEngine(cfg, &rr);
+    AX_S32 ret = IvpsCsc(engine, src, dst);
+    if (ret != AX_SUCCESS && engine != IvpsEngine::kTdp) {
+        ret = IvpsCsc(IvpsEngine::kTdp, src, dst);
+    }
+    return ret;
+}
 
 std::size_t AlignUp(std::size_t value, std::size_t alignment) noexcept {
     if (alignment == 0) {
@@ -301,7 +487,6 @@ bool FillBackground(AxImage& image, std::uint32_t rgb) noexcept {
 
 bool SameGeometryAndFormat(const AxImage& source, const AxImage& destination, const ImageProcessRequest& request) noexcept {
     return !request.enable_crop &&
-           request.resize.mode == ResizeMode::kStretch &&
            source.format() == destination.format() &&
            source.width() == destination.width() &&
            source.height() == destination.height() &&
@@ -349,8 +534,13 @@ public:
             return false;
         }
 
-        // IVPS is not reliably thread-safe across MSP versions; serialize in-process.
-        std::lock_guard<std::mutex> ivps_lock(common::internal::IvpsGlobalMutex());
+        // IVPS is not reliably thread-safe across MSP versions; serialize in-process by default.
+        // For maximum throughput, serialization is disabled by default.
+        // If you hit instability on a specific MSP/driver version, set AXVSDK_IVPS_SERIALIZE=1 (or AXP_IVPS_SERIALIZE=1).
+        std::unique_lock<std::mutex> ivps_lock(common::internal::IvpsGlobalMutex(), std::defer_lock);
+        if (common::internal::IvpsSerializeEnabled()) {
+            ivps_lock.lock();
+        }
 
         ImageDescriptor expected_output{};
         if (!ResolveOutputDescriptor(source, request, &expected_output)) {
@@ -379,7 +569,11 @@ public:
 
         AX_S32 ret = AX_SUCCESS;
         if (SameGeometryAndFormat(source, destination, request)) {
-            ret = AX_IVPS_CmmCopyVpp(src_frame.u64PhyAddr[0], dst_frame->u64PhyAddr[0], destination.byte_size());
+            // Fast-path: treat as a "copy" but do it through CropResize (STRETCH) to avoid
+            // CPU background fill when resize.mode is keep_aspect, and to avoid MSP variants where
+            // AX_IVPS_CmmCopy* may reject unaligned sizes with ILLEGAL_PARAM.
+            const auto stretch = MakeStretchAspectRatio();
+            ret = CropResizeDispatched(&src_frame, dst_frame, &stretch);
         } else {
             AX_VIDEO_FRAME_T src_frame_for_processing = src_frame;
             if (request.enable_crop) {
@@ -395,11 +589,12 @@ public:
             const bool needs_format_change = source.format() != destination.format();
 
             if (!needs_geometry_change && needs_format_change) {
-                // For packed RGB/BGR, AX650 MSP samples consistently use the TDP path.
-                // Some MSP versions show corruption when using VPP CSC for RGB/BGR.
-                ret = AX_IVPS_CscTdp(&src_frame_for_processing, dst_frame);
+                ret = CscDispatched(&src_frame_for_processing, dst_frame);
             } else if (!needs_format_change) {
-                if (request.resize.mode == ResizeMode::kKeepAspectRatio &&
+                // Only paint background when we actually change geometry (resize/crop). When the
+                // source already matches the destination shape, filling a full frame in non-cached
+                // CMM memory is expensive and unnecessary.
+                if (request.resize.mode == ResizeMode::kKeepAspectRatio && needs_geometry_change &&
                     !FillBackground(destination, request.resize.background_color)) {
                     std::fprintf(stderr, "ax650 image processor: fill background failed fmt=%d size=%ux%u\n",
                                  static_cast<int>(destination.format()), destination.width(), destination.height());
@@ -407,7 +602,7 @@ public:
                 }
 
                 // Same format: CropResizeVpp handles crop/resize.
-                ret = AX_IVPS_CropResizeVpp(&src_frame_for_processing, dst_frame, &aspect_ratio);
+                ret = CropResizeDispatched(&src_frame_for_processing, dst_frame, &aspect_ratio);
             } else {
                 // AX650 IVPS CropResizeVpp does not reliably support simultaneous resize and color conversion.
                 // Stage it: resize in source format -> CSC to destination format.
@@ -441,9 +636,9 @@ public:
                     return false;
                 }
 
-                ret = AX_IVPS_CropResizeVpp(&src_frame_for_processing, intermediate_frame, &aspect_ratio);
+                ret = CropResizeDispatched(&src_frame_for_processing, intermediate_frame, &aspect_ratio);
                 if (ret == AX_SUCCESS) {
-                    ret = AX_IVPS_CscTdp(intermediate_frame, dst_frame);
+                    ret = CscDispatched(intermediate_frame, dst_frame);
                 }
             }
         }

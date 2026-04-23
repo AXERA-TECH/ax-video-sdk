@@ -289,7 +289,12 @@ public:
         }
 
         // Serialize IVPS draw operations with other IVPS users (e.g. pre-process) to avoid MSP thread-safety issues.
-        std::lock_guard<std::mutex> ivps_lock(common::internal::IvpsGlobalMutex());
+        // For maximum throughput, serialization is disabled by default.
+        // If you hit instability on a specific MSP/driver version, set AXVSDK_IVPS_SERIALIZE=1 (or AXP_IVPS_SERIALIZE=1).
+        std::unique_lock<std::mutex> ivps_lock(common::internal::IvpsGlobalMutex(), std::defer_lock);
+        if (common::internal::IvpsSerializeEnabled()) {
+            ivps_lock.lock();
+        }
 
         AX_VIDEO_FRAME_T frame{};
         if (!ResolveFrame(image, &frame)) {

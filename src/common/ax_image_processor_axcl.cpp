@@ -154,7 +154,6 @@ AX_IVPS_ASPECT_RATIO_T MakeAspectRatio(const ImageProcessRequest& request) noexc
 
 bool SameGeometryAndFormat(const AxImage& source, const AxImage& destination, const ImageProcessRequest& request) noexcept {
     return !request.enable_crop &&
-           request.resize.mode == ResizeMode::kStretch &&
            source.format() == destination.format() &&
            source.width() == destination.width() &&
            source.height() == destination.height() &&

@@ -185,8 +185,13 @@ bool CopyFrameByCropResizeVpp(const AX_VIDEO_FRAME_T& source_frame, AxImage* des
         return false;
     }
 
-    // IVPS is not consistently thread-safe across MSP/driver versions; serialize in-process.
-    std::lock_guard<std::mutex> ivps_lock(IvpsGlobalMutex());
+    // IVPS is not consistently thread-safe across MSP/driver versions; allow optional in-process serialization.
+    // For maximum throughput, serialization is disabled by default.
+    // If you hit instability on a specific MSP/driver version, set AXVSDK_IVPS_SERIALIZE=1 (or AXP_IVPS_SERIALIZE=1).
+    std::unique_lock<std::mutex> ivps_lock(IvpsGlobalMutex(), std::defer_lock);
+    if (IvpsSerializeEnabled()) {
+        ivps_lock.lock();
+    }
 
     auto* dst_frame = AxImageAccess::MutableAxFrame(destination);
     if (dst_frame == nullptr) {
