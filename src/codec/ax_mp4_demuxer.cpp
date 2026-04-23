@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cerrno>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -18,6 +19,13 @@
 #include <utility>
 #include <vector>
 #include <cstdio>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace axvsdk::codec {
 
@@ -33,40 +41,49 @@ struct NalUnitView {
     std::uint8_t type{0};
 };
 
-std::vector<std::uint8_t> ReadFileBytes(const std::string& file_path) {
-    std::ifstream input(file_path, std::ios::binary);
-    if (!input) {
-        return {};
-    }
+struct FileReader {
+    int fd{-1};
+    const std::uint8_t* mapped{nullptr};
+    std::size_t mapped_size{0};
+    std::uint64_t file_size{0};
+};
 
-    input.seekg(0, std::ios::end);
-    const auto size = static_cast<std::size_t>(input.tellg());
-    input.seekg(0, std::ios::beg);
-
-    std::vector<std::uint8_t> bytes(size);
-    if (size != 0) {
-        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(size));
-        if (!input) {
-            return {};
-        }
-    }
-
-    return bytes;
-}
-
-int ReadFromMemory(int64_t offset, void* buffer, size_t size, void* token) {
+int ReadFromFile(int64_t offset, void* buffer, size_t size, void* token) {
     if (offset < 0 || buffer == nullptr || token == nullptr) {
         return -1;
     }
+    if (size == 0) {
+        return 0;
+    }
 
-    const auto* bytes = static_cast<const std::vector<std::uint8_t>*>(token);
-    const auto begin = static_cast<std::size_t>(offset);
-    if (begin > bytes->size() || size > (bytes->size() - begin)) {
+    auto* reader = static_cast<FileReader*>(token);
+    const auto begin = static_cast<std::uint64_t>(offset);
+    if (begin > reader->file_size || static_cast<std::uint64_t>(size) > (reader->file_size - begin)) {
         return -1;
     }
 
-    std::memcpy(buffer, bytes->data() + begin, size);
-    return 0;
+    if (reader->mapped != nullptr) {
+        const auto idx = static_cast<std::size_t>(begin);
+        if (idx > reader->mapped_size || size > (reader->mapped_size - idx)) {
+            return -1;
+        }
+        std::memcpy(buffer, reader->mapped + idx, size);
+        return 0;
+    }
+
+#if defined(__unix__) || defined(__APPLE__)
+    if (reader->fd < 0) {
+        return -1;
+    }
+    if (size > static_cast<std::size_t>(SSIZE_MAX)) {
+        return -1;
+    }
+    const ssize_t n = ::pread(reader->fd, buffer, size, static_cast<off_t>(begin));
+    return (n == static_cast<ssize_t>(size)) ? 0 : -1;
+#else
+    (void)reader;
+    return -1;
+#endif
 }
 
 VideoCodecType ToCodecType(unsigned object_type_indication) noexcept {
@@ -298,7 +315,9 @@ bool CollectHevcDecoderConfig(const MP4D_demux_t& demux,
 }  // namespace
 
 struct AxMp4Demuxer::Impl {
-    std::vector<std::uint8_t> file_bytes;
+    FileReader reader{};
+    void* mapped_view{nullptr};
+    std::vector<std::uint8_t> sample_bytes;
     MP4D_demux_t demux{};
     Mp4VideoInfo video_info{};
     unsigned track_index{0};
@@ -312,20 +331,68 @@ struct AxMp4Demuxer::Impl {
         if (opened) {
             MP4D_close(&demux);
         }
+#if defined(__unix__) || defined(__APPLE__)
+        if (mapped_view != nullptr && reader.mapped_size != 0) {
+            (void)::munmap(mapped_view, reader.mapped_size);
+        }
+        if (reader.fd >= 0) {
+            (void)::close(reader.fd);
+        }
+#endif
     }
 };
 
 std::unique_ptr<AxMp4Demuxer> AxMp4Demuxer::Open(const std::string& file_path) {
     auto impl = std::make_unique<Impl>();
-    impl->file_bytes = ReadFileBytes(file_path);
-    if (impl->file_bytes.empty()) {
+
+#if defined(__unix__) || defined(__APPLE__)
+    impl->reader.fd = ::open(file_path.c_str(), O_RDONLY);
+    if (impl->reader.fd < 0) {
         return nullptr;
+    }
+    struct stat st {};
+    if (::fstat(impl->reader.fd, &st) != 0 || st.st_size <= 0) {
+        return nullptr;
+    }
+    impl->reader.file_size = static_cast<std::uint64_t>(st.st_size);
+
+    if (impl->reader.file_size <= static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        const auto map_size = static_cast<std::size_t>(impl->reader.file_size);
+        void* view = ::mmap(nullptr, map_size, PROT_READ, MAP_PRIVATE, impl->reader.fd, 0);
+        if (view != MAP_FAILED) {
+            impl->mapped_view = view;
+            impl->reader.mapped = static_cast<const std::uint8_t*>(view);
+            impl->reader.mapped_size = map_size;
+        }
     }
 
-    if (MP4D_open(&impl->demux, ReadFromMemory, &impl->file_bytes,
-                  static_cast<int64_t>(impl->file_bytes.size())) != 1) {
+    if (MP4D_open(&impl->demux, ReadFromFile, &impl->reader, static_cast<int64_t>(impl->reader.file_size)) != 1) {
         return nullptr;
     }
+#else
+    // Fallback: platforms without pread/mmap support keep the previous behavior (read entire file).
+    std::ifstream input(file_path, std::ios::binary);
+    if (!input) {
+        return nullptr;
+    }
+    input.seekg(0, std::ios::end);
+    const auto size = static_cast<std::size_t>(input.tellg());
+    input.seekg(0, std::ios::beg);
+    if (size == 0) {
+        return nullptr;
+    }
+    impl->sample_bytes.resize(size);
+    input.read(reinterpret_cast<char*>(impl->sample_bytes.data()), static_cast<std::streamsize>(size));
+    if (!input) {
+        return nullptr;
+    }
+    impl->reader.mapped = impl->sample_bytes.data();
+    impl->reader.mapped_size = impl->sample_bytes.size();
+    impl->reader.file_size = impl->sample_bytes.size();
+    if (MP4D_open(&impl->demux, ReadFromFile, &impl->reader, static_cast<int64_t>(impl->reader.file_size)) != 1) {
+        return nullptr;
+    }
+#endif
     impl->opened = true;
 
     for (unsigned index = 0; index < impl->demux.track_count; ++index) {
@@ -379,14 +446,31 @@ bool AxMp4Demuxer::ReadNextPacket(EncodedPacket* packet) {
     unsigned frame_bytes = 0;
     unsigned dts = 0;
     unsigned duration = 0;
-    const auto offset = static_cast<std::size_t>(
+    const auto offset = static_cast<std::uint64_t>(
         MP4D_frame_offset(&impl_->demux, impl_->track_index, impl_->sample_index, &frame_bytes, &dts, &duration));
 
-    if (offset > impl_->file_bytes.size() || frame_bytes > (impl_->file_bytes.size() - offset)) {
+    if (offset > impl_->reader.file_size ||
+        static_cast<std::uint64_t>(frame_bytes) > (impl_->reader.file_size - offset) ||
+        frame_bytes == 0) {
         return false;
     }
 
-    const auto* sample = impl_->file_bytes.data() + offset;
+    const std::uint8_t* sample = nullptr;
+    if (impl_->reader.mapped != nullptr) {
+        sample = impl_->reader.mapped + static_cast<std::size_t>(offset);
+    } else {
+#if defined(__unix__) || defined(__APPLE__)
+        impl_->sample_bytes.resize(frame_bytes);
+        const ssize_t n =
+            ::pread(impl_->reader.fd, impl_->sample_bytes.data(), frame_bytes, static_cast<off_t>(offset));
+        if (n != static_cast<ssize_t>(frame_bytes)) {
+            return false;
+        }
+        sample = impl_->sample_bytes.data();
+#else
+        return false;
+#endif
+    }
     std::vector<NalUnitView> nal_units;
     bool key_frame = false;
     std::size_t resolved_nal_length_size = impl_->nal_length_size;
