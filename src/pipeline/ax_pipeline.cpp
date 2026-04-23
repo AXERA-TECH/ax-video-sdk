@@ -167,7 +167,7 @@ public:
             Close();
         }
 
-        if (config.input.uri.empty() || config.outputs.empty()) {
+        if (config.input.uri.empty()) {
             return false;
         }
 
@@ -865,6 +865,10 @@ private:
                 pending_callback_source_frame_ = source_frame;
                 frame_callback_cv_.notify_one();
             }
+        }
+
+        if (branches_.empty()) {
+            return;
         }
 
         common::AxImage::Ptr encoder_frame = source_frame;
