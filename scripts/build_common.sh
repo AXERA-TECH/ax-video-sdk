@@ -77,6 +77,19 @@ case "${CHIP}" in
             COMPILER_CHECK="g++"
         fi
         ;;
+    axcl-riscv64)
+        # NOTE: This repo does not bundle an AXCL RISC-V zip by default.
+        # Provide the AXCL SDK root via AXSDK_AXCL_DIR.
+        MSP_ZIP_NAME="axcl_linux_riscv.zip"
+        MSP_ZIP_DEFAULT="${ROOT_DIR}/.ci/downloads/${MSP_ZIP_NAME}"
+        MSP_EXTRACT_DIR="${ROOT_DIR}/.ci/axcl/axcl_linux_riscv"
+        MSP_ROOT=""
+        TOOLCHAIN_FILE="${ROOT_DIR}/toolchains/riscv64-unknown-linux-gnu.toolchain.cmake"
+        DEFAULT_TOOLCHAIN_BIN=""
+        COMPILER_CHECK="riscv64-unknown-linux-gnu-g++"
+        AXCL_ARCH="riscv64"
+        AXCL_SUBDIR_NAME="axcl_linux_riscv"
+        ;;
     *)
         echo "unsupported chip: ${CHIP}" >&2
         exit 1
@@ -108,6 +121,10 @@ if [[ "${CHIP}" == axcl-* ]]; then
     if [[ -n "${AXSDK_AXCL_DIR:-}" ]]; then
         MSP_ROOT="${AXSDK_AXCL_DIR}"
     else
+        if [[ "${CHIP}" == "axcl-riscv64" ]]; then
+            echo "AXCL root not found for ${CHIP}; set AXSDK_AXCL_DIR to a riscv AXCL SDK root." >&2
+            exit 1
+        fi
         if [[ -f "${MSP_ZIP_PATH}" ]]; then
             mkdir -p "${MSP_EXTRACT_DIR}"
             if [[ ! -d "${MSP_EXTRACT_DIR}/${AXCL_SUBDIR_NAME}" ]]; then

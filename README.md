@@ -92,6 +92,12 @@ AXCL 也支持直接使用本机已安装目录：
 export AXSDK_AXCL_DIR=/usr
 ```
 
+AXCL riscv64 交叉编译时通常需要显式指定 riscv 版 AXCL SDK root：
+
+```bash
+export AXSDK_AXCL_DIR=/path/to/axcl_linux_riscv
+```
+
 ### 2. 准备交叉编译器
 
 构建脚本默认会从 `.ci/toolchains/.../bin` 查找编译器。
@@ -120,6 +126,7 @@ export AXSDK_TOOLCHAIN_BIN=/path/to/toolchain/bin
 - [build_ax620qp.sh](/home/axera/ax_video_sdk/build_ax620qp.sh)
 - [build_axcl_x86.sh](/home/axera/ax_video_sdk/build_axcl_x86.sh)
 - [build_axcl_aarch64.sh](/home/axera/ax_video_sdk/build_axcl_aarch64.sh)
+- [build_axcl_riscv64.sh](/home/axera/ax_video_sdk/build_axcl_riscv64.sh)
 
 示例：
 
@@ -130,6 +137,7 @@ export AXSDK_TOOLCHAIN_BIN=/path/to/toolchain/bin
 ./build_ax620qp.sh
 ./build_axcl_x86.sh
 ./build_axcl_aarch64.sh
+./build_axcl_riscv64.sh
 ```
 
 ### 4. 构建产物
