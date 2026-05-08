@@ -78,14 +78,12 @@ case "${CHIP}" in
         fi
         ;;
     axcl-riscv64)
-        # NOTE: This repo does not bundle an AXCL RISC-V zip by default.
-        # Provide the AXCL SDK root via AXSDK_AXCL_DIR.
-        MSP_ZIP_NAME="axcl_linux_riscv.zip"
+        MSP_ZIP_NAME="axcl_linux_riscv_3.14.0.zip"
         MSP_ZIP_DEFAULT="${ROOT_DIR}/.ci/downloads/${MSP_ZIP_NAME}"
-        MSP_EXTRACT_DIR="${ROOT_DIR}/.ci/axcl/axcl_linux_riscv"
+        MSP_EXTRACT_DIR="${ROOT_DIR}/.ci/axcl/axcl_linux_riscv_3.14.0"
         MSP_ROOT=""
         TOOLCHAIN_FILE="${ROOT_DIR}/toolchains/riscv64-unknown-linux-gnu.toolchain.cmake"
-        DEFAULT_TOOLCHAIN_BIN=""
+        DEFAULT_TOOLCHAIN_BIN="${ROOT_DIR}/.ci/toolchains/gcc-14.3-riscv64-unknown-linux-gnu-2.39/bin"
         COMPILER_CHECK="riscv64-unknown-linux-gnu-g++"
         AXCL_ARCH="riscv64"
         AXCL_SUBDIR_NAME="axcl_linux_riscv"
@@ -105,6 +103,13 @@ PACKAGE_DIR="${STAGE_DIR}/${PACKAGE_BASENAME}"
 
 if [[ -d "${TOOLCHAIN_BIN}" ]]; then
     export PATH="${TOOLCHAIN_BIN}:${PATH}"
+else
+    # Best-effort auto-detect: allow CI scripts to extract toolchains without knowing the top-level directory name.
+    DETECTED_COMPILER="$(find "${ROOT_DIR}/.ci/toolchains" -maxdepth 5 -type f -name "${COMPILER_CHECK}" -print 2>/dev/null | head -n 1 || true)"
+    if [[ "${DETECTED_COMPILER}" == */bin/${COMPILER_CHECK} ]]; then
+        TOOLCHAIN_BIN="${DETECTED_COMPILER%/${COMPILER_CHECK}}"
+        export PATH="${TOOLCHAIN_BIN}:${PATH}"
+    fi
 fi
 
 if ! command -v "${COMPILER_CHECK}" >/dev/null 2>&1; then
@@ -121,10 +126,6 @@ if [[ "${CHIP}" == axcl-* ]]; then
     if [[ -n "${AXSDK_AXCL_DIR:-}" ]]; then
         MSP_ROOT="${AXSDK_AXCL_DIR}"
     else
-        if [[ "${CHIP}" == "axcl-riscv64" ]]; then
-            echo "AXCL root not found for ${CHIP}; set AXSDK_AXCL_DIR to a riscv AXCL SDK root." >&2
-            exit 1
-        fi
         if [[ -f "${MSP_ZIP_PATH}" ]]; then
             mkdir -p "${MSP_EXTRACT_DIR}"
             if [[ ! -d "${MSP_EXTRACT_DIR}/${AXCL_SUBDIR_NAME}" ]]; then
@@ -145,9 +146,18 @@ if [[ "${CHIP}" == axcl-* ]]; then
             fi
         fi
 
-        if [[ -z "${MSP_ROOT}" && -f "/usr/include/axcl/axcl.h" && -d "/usr/lib/axcl" ]]; then
+        # Only use system-installed AXCL for native host builds.
+        # For cross-compiling (e.g. axcl-riscv64 on x86_64), /usr will contain host-arch libs.
+        USE_SYSTEM_AXCL="0"
+        if [[ "${CHIP}" == "axcl-x86_64" ]]; then
+            USE_SYSTEM_AXCL="1"
+        elif [[ "${CHIP}" == "axcl-aarch64" ]] && [[ "${HOST_ARCH}" == "aarch64" || "${HOST_ARCH}" == "arm64" ]]; then
+            USE_SYSTEM_AXCL="1"
+        fi
+
+        if [[ "${USE_SYSTEM_AXCL}" == "1" ]] && [[ -z "${MSP_ROOT}" && -f "/usr/include/axcl/axcl.h" && -d "/usr/lib/axcl" ]]; then
             MSP_ROOT="/usr"
-        elif [[ -z "${MSP_ROOT}" && -f "/usr/include/axcl.h" && ( -d "/usr/lib" || -d "/usr/lib64" ) ]]; then
+        elif [[ "${USE_SYSTEM_AXCL}" == "1" ]] && [[ -z "${MSP_ROOT}" && -f "/usr/include/axcl.h" && ( -d "/usr/lib" || -d "/usr/lib64" ) ]]; then
             MSP_ROOT="/usr"
         fi
     fi

@@ -63,9 +63,17 @@ jobs:
             toolchain_url: https://developer.arm.com/-/media/Files/downloads/gnu-a/9.2-2019.12/binrel/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu.tar.xz
             toolchain_archive: gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu.tar.xz
             toolchain_root: gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu
+          - chip: axcl-riscv64
+            script: ./build_axcl_riscv64.sh
+            msp_zip: axcl_linux_riscv_3.14.0.zip
+            msp_url: https://github.com/ZHEQIUSHUI/assets/releases/download/risc-v/axcl_linux_riscv_3.14.0.zip
+            toolchain_pkg: unzip xz-utils
+            toolchain_url: https://github.com/ZHEQIUSHUI/assets/releases/download/risc-v/gcc-14.3-riscv64-unknown-linux-gnu-2.39.tar.xz
+            toolchain_archive: gcc-14.3-riscv64-unknown-linux-gnu-2.39.tar.xz
+            toolchain_root: gcc-14.3-riscv64-unknown-linux-gnu-2.39
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -99,37 +107,33 @@ jobs:
         env:
           TOOLCHAIN_URL: ${{ matrix.toolchain_url }}
           TOOLCHAIN_ARCHIVE: ${{ matrix.toolchain_archive }}
-          TOOLCHAIN_ROOT: ${{ matrix.toolchain_root }}
         run: |
+          set -euo pipefail
           TOOLCHAIN_BASE="${{ github.workspace }}/.ci/toolchains"
-          TOOLCHAIN_BIN_DIR="$TOOLCHAIN_BASE/$TOOLCHAIN_ROOT/bin"
           mkdir -p "$TOOLCHAIN_BASE"
           if [ ! -f "$TOOLCHAIN_BASE/$TOOLCHAIN_ARCHIVE" ]; then
             curl -L "$TOOLCHAIN_URL" -o "$TOOLCHAIN_BASE/$TOOLCHAIN_ARCHIVE"
           fi
-          if [ ! -d "$TOOLCHAIN_BIN_DIR" ]; then
-            case "$TOOLCHAIN_ARCHIVE" in
-              *.tar.xz|*.tgz|*.tar.gz)
-                tar -xf "$TOOLCHAIN_BASE/$TOOLCHAIN_ARCHIVE" -C "$TOOLCHAIN_BASE"
-                ;;
-              *)
-                echo "unsupported toolchain archive: $TOOLCHAIN_ARCHIVE" >&2
-                exit 1
-                ;;
-            esac
-          fi
-          test -x "$TOOLCHAIN_BIN_DIR" || test -d "$TOOLCHAIN_BIN_DIR"
+          case "$TOOLCHAIN_ARCHIVE" in
+            *.tar.xz|*.tgz|*.tar.gz)
+              tar -xf "$TOOLCHAIN_BASE/$TOOLCHAIN_ARCHIVE" -C "$TOOLCHAIN_BASE"
+              ;;
+            *)
+              echo "unsupported toolchain archive: $TOOLCHAIN_ARCHIVE" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Build
         env:
           AXSDK_MSP_ZIP_PATH: ${{ github.workspace }}/.ci/downloads/${{ matrix.msp_zip }}
           AXSDK_TOOLCHAIN_BIN: ${{ github.workspace }}/.ci/toolchains/${{ matrix.toolchain_root }}/bin
         run: |
-          chmod +x ./build_ax650.sh ./build_ax630c.sh ./build_ax620q.sh ./build_ax620qp.sh ./build_axcl_x86.sh ./build_axcl_aarch64.sh ./scripts/build_common.sh
+          chmod +x ./build_ax650.sh ./build_ax630c.sh ./build_ax620q.sh ./build_ax620qp.sh ./build_axcl_x86.sh ./build_axcl_aarch64.sh ./build_axcl_riscv64.sh ./scripts/build_common.sh
           ${{ matrix.script }}
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ax_video_sdk_${{ matrix.chip }}
           path: artifacts/${{ matrix.chip }}/ax_video_sdk_${{ matrix.chip }}.tar.gz
