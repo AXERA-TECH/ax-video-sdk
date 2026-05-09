@@ -202,9 +202,33 @@ public:
             return CopyImage(source, &destination);
         }
 
-        auto& mutable_source = const_cast<AxImage&>(source);
+        const AxImage* src_image = &source;
+        AxImage::Ptr staged_source;
+        const bool source_has_device_addr = (source.physical_address(0) != 0) || (source.physical_address(1) != 0);
+        if (!source_has_device_addr) {
+            // AXCL IVPS requires device-addressable frames. When the source is host memory (e.g. plugin isolation
+            // subprocess), stage it into CMM first so crop/resize/CSC can run on hardware.
+            ImageDescriptor staged_desc{};
+            staged_desc.format = source.format();
+            staged_desc.width = source.width();
+            staged_desc.height = source.height();
+
+            ImageAllocationOptions staged_opts{};
+            staged_opts.memory_type = MemoryType::kCmm;
+            staged_opts.cache_mode = CacheMode::kNonCached;
+            staged_opts.alignment = 0x1000;
+            staged_opts.token = "AxclImageProcessorSourceStage";
+
+            staged_source = AxImage::Create(staged_desc, staged_opts);
+            if (!staged_source || !CopyImage(source, staged_source.get())) {
+                return false;
+            }
+            src_image = staged_source.get();
+        }
+
+        auto& mutable_source = const_cast<AxImage&>(*src_image);
         (void)mutable_source.FlushCache();
-        AX_VIDEO_FRAME_T src_frame = AxImageAccess::GetAxFrame(source);
+        AX_VIDEO_FRAME_T src_frame = AxImageAccess::GetAxFrame(*src_image);
         auto* dst_frame = AxImageAccess::MutableAxFrame(&destination);
         if (dst_frame == nullptr) {
             return false;
