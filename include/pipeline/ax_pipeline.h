@@ -93,6 +93,20 @@ public:
     virtual void ClearOsd() noexcept = 0;
 
     virtual PipelineStats GetStats() const = 0;
+
+    // --- Dynamic output management (optional) ---
+    // Some applications want to add/remove encoding+mux outputs without restarting demux/vdec.
+    // Default implementation returns false (not supported).
+    virtual bool AddOutput(const PipelineOutputConfig& /*output*/,
+                           std::size_t* /*out_index*/,
+                           std::string* error) {
+        if (error) *error = "AddOutput not supported";
+        return false;
+    }
+    virtual bool RemoveOutput(std::size_t /*index*/, std::string* error) {
+        if (error) *error = "RemoveOutput not supported";
+        return false;
+    }
 };
 
 std::unique_ptr<Pipeline> CreatePipeline();

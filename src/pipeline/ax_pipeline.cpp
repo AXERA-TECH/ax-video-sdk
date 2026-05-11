@@ -226,6 +226,7 @@ public:
                 encoder_config.input_queue_depth = output.input_queue_depth;
             }
             encoder_config.overflow_policy = output.overflow_policy;
+            encoder_config.resize = output.resize;
 
             if (!encoder->Open(encoder_config)) {
                 decoder->Close();
@@ -286,8 +287,6 @@ public:
                 });
             }
 
-            encoder_config.resize = output.resize;
-
             branches.push_back(OutputBranch{output, std::move(encoder), std::move(muxer)});
         }
 
@@ -313,7 +312,10 @@ public:
         config_ = config;
         demuxer_ = std::move(demuxer);
         decoder_ = std::move(decoder);
-        branches_ = std::move(branches);
+        {
+            std::lock_guard<std::mutex> lock(branches_mutex_);
+            branches_ = std::move(branches);
+        }
         drawer_ = common::internal::CreatePlatformDrawer();
         decoded_frames_.store(0, std::memory_order_relaxed);
         branch_submit_failures_.store(0, std::memory_order_relaxed);
@@ -347,13 +349,20 @@ public:
         }
         demuxer_.reset();
 
-        for (auto& branch : branches_) {
-            if (branch.muxer) {
-                branch.muxer->Close();
-            }
-            branch.encoder->Close();
+        std::vector<OutputBranch> branches;
+        {
+            std::lock_guard<std::mutex> lock(branches_mutex_);
+            branches = std::move(branches_);
+            branches_.clear();
         }
-        branches_.clear();
+        for (auto& branch : branches) {
+            if (branch.encoder) {
+                if (branch.muxer) {
+                    branch.muxer->Close();
+                }
+                branch.encoder->Close();
+            }
+        }
         {
             std::lock_guard<std::mutex> frame_lock(frame_mutex_);
             latest_source_frame_.reset();
@@ -390,19 +399,25 @@ public:
         callback_stop_ = false;
         frame_callback_thread_ = std::thread(&AxPipeline::FrameCallbackLoop, this);
 
-        for (auto& branch : branches_) {
-            if (!branch.encoder->Start()) {
-                for (auto& started_branch : branches_) {
-                    started_branch.encoder->Stop();
+        {
+            std::lock_guard<std::mutex> lock(branches_mutex_);
+            for (auto& branch : branches_) {
+                if (!branch.encoder->Start()) {
+                    for (auto& started_branch : branches_) {
+                        started_branch.encoder->Stop();
+                    }
+                    StopFrameCallbackThread();
+                    return false;
                 }
-                StopFrameCallbackThread();
-                return false;
             }
         }
 
         if (!decoder_ || !decoder_->Start()) {
-            for (auto& branch : branches_) {
-                branch.encoder->Stop();
+            {
+                std::lock_guard<std::mutex> lock(branches_mutex_);
+                for (auto& branch : branches_) {
+                    branch.encoder->Stop();
+                }
             }
             StopFrameCallbackThread();
             return false;
@@ -413,8 +428,11 @@ public:
             if (!demuxer_->Reset()) {
                 demux_stop_ = true;
                 decoder_->Stop();
-                for (auto& branch : branches_) {
-                    branch.encoder->Stop();
+                {
+                    std::lock_guard<std::mutex> lock(branches_mutex_);
+                    for (auto& branch : branches_) {
+                        branch.encoder->Stop();
+                    }
                 }
                 StopFrameCallbackThread();
                 return false;
@@ -457,8 +475,11 @@ public:
             pending_callback_source_frame_.reset();
         }
 
-        for (auto& branch : branches_) {
-            branch.encoder->Stop();
+        {
+            std::lock_guard<std::mutex> lock(branches_mutex_);
+            for (auto& branch : branches_) {
+                branch.encoder->Stop();
+            }
         }
 
         StopFrameCallbackThread();
@@ -549,11 +570,84 @@ public:
         PipelineStats stats{};
         stats.decoded_frames = decoded_frames_.load(std::memory_order_relaxed);
         stats.branch_submit_failures = branch_submit_failures_.load(std::memory_order_relaxed);
-        stats.output_stats.reserve(branches_.size());
-        for (const auto& branch : branches_) {
-            stats.output_stats.push_back(branch.encoder->GetStats());
+        {
+            std::lock_guard<std::mutex> lock(branches_mutex_);
+            stats.output_stats.reserve(branches_.size());
+            for (const auto& branch : branches_) {
+                stats.output_stats.push_back(branch.encoder->GetStats());
+            }
         }
         return stats;
+    }
+
+    bool AddOutput(const PipelineOutputConfig& output,
+                   std::size_t* out_index,
+                   std::string* error) override {
+        if (!open_) {
+            if (error) *error = "pipeline not opened";
+            return false;
+        }
+
+        const double input_frame_rate = input_stream_.frame_rate > 0.0 ? input_stream_.frame_rate : 30.0;
+        OutputBranch branch;
+        std::string err;
+        if (!CreateOutputBranch(output, config_.device_id, input_frame_rate, &branch, &err)) {
+            if (error) *error = err.empty() ? "create output branch failed" : err;
+            return false;
+        }
+
+        if (running_) {
+            if (!branch.encoder->Start()) {
+                if (branch.muxer) {
+                    branch.muxer->Close();
+                }
+                branch.encoder->Close();
+                if (error) *error = "encoder start failed";
+                return false;
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(branches_mutex_);
+            branches_.push_back(std::move(branch));
+            config_.outputs.push_back(output);
+            if (out_index) {
+                *out_index = branches_.size() - 1U;
+            }
+        }
+        return true;
+    }
+
+    bool RemoveOutput(std::size_t index, std::string* error) override {
+        OutputBranch removed;
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(branches_mutex_);
+            if (index >= branches_.size()) {
+                if (error) *error = "output index out of range";
+                return false;
+            }
+
+            removed = std::move(branches_[index]);
+            branches_.erase(branches_.begin() + static_cast<std::ptrdiff_t>(index));
+            if (index < config_.outputs.size()) {
+                config_.outputs.erase(config_.outputs.begin() + static_cast<std::ptrdiff_t>(index));
+            }
+            found = true;
+        }
+
+        if (!found) {
+            if (error) *error = "output not found";
+            return false;
+        }
+
+        // Close outside the lock to avoid blocking the decode thread.
+        removed.encoder->Stop();
+        if (removed.muxer) {
+            removed.muxer->Close();
+        }
+        removed.encoder->Close();
+        return true;
     }
 
 private:
@@ -562,6 +656,88 @@ private:
         std::unique_ptr<codec::VideoEncoder> encoder;
         std::unique_ptr<Muxer> muxer;
     };
+
+    bool CreateOutputBranch(const PipelineOutputConfig& output,
+                            std::int32_t device_id,
+                            double input_frame_rate,
+                            OutputBranch* out,
+                            std::string* error) {
+        if (out == nullptr) {
+            if (error) *error = "output branch is null";
+            return false;
+        }
+        if (output.uris.empty() && !output.packet_callback) {
+            if (error) *error = "output has no uris and no packet_callback";
+            return false;
+        }
+
+        auto encoder = codec::CreateVideoEncoder();
+        if (!encoder) {
+            if (error) *error = "CreateVideoEncoder failed";
+            return false;
+        }
+
+        codec::VideoEncoderConfig encoder_config{};
+        encoder_config.codec = output.codec;
+        encoder_config.width = output.width == 0 ? input_stream_.width : output.width;
+        encoder_config.height = output.height == 0 ? input_stream_.height : output.height;
+        encoder_config.device_id = device_id;
+        encoder_config.frame_rate = output.frame_rate > 0.0 ? output.frame_rate : input_frame_rate;
+        encoder_config.bitrate_kbps = output.bitrate_kbps;
+        encoder_config.gop = output.gop;
+        if (output.input_queue_depth > 0) {
+            encoder_config.input_queue_depth = output.input_queue_depth;
+        }
+        encoder_config.overflow_policy = output.overflow_policy;
+        encoder_config.resize = output.resize;
+
+        if (!encoder->Open(encoder_config)) {
+            if (error) *error = "encoder Open failed";
+            return false;
+        }
+
+        std::unique_ptr<Muxer> muxer;
+        if (!output.uris.empty()) {
+            muxer = CreateMuxer();
+            if (!muxer) {
+                encoder->Close();
+                if (error) *error = "CreateMuxer failed";
+                return false;
+            }
+
+            MuxerConfig muxer_config{};
+            muxer_config.stream.codec = output.codec;
+            muxer_config.stream.width = encoder_config.width;
+            muxer_config.stream.height = encoder_config.height;
+            muxer_config.stream.frame_rate = encoder_config.frame_rate > 0.0 ? encoder_config.frame_rate
+                                                                              : input_frame_rate;
+            muxer_config.uris = output.uris;
+            if (!muxer->Open(muxer_config)) {
+                muxer->Close();
+                encoder->Close();
+                if (error) *error = "muxer Open failed";
+                return false;
+            }
+        }
+
+        auto* muxer_ptr = muxer.get();
+        if (output.packet_callback || muxer_ptr != nullptr) {
+            encoder->SetPacketCallback([packet_callback = output.packet_callback,
+                                        muxer = muxer_ptr](codec::EncodedPacket packet) mutable {
+                if (packet_callback) {
+                    packet_callback(packet);
+                }
+                if (muxer != nullptr) {
+                    (void)muxer->SubmitPacket(std::move(packet));
+                }
+            });
+        }
+
+        out->config = output;
+        out->encoder = std::move(encoder);
+        out->muxer = std::move(muxer);
+        return true;
+    }
 
     void StopFrameCallbackThread() noexcept {
         {
@@ -867,8 +1043,11 @@ private:
             }
         }
 
-        if (branches_.empty()) {
-            return;
+        {
+            std::lock_guard<std::mutex> lock(branches_mutex_);
+            if (branches_.empty()) {
+                return;
+            }
         }
 
         common::AxImage::Ptr encoder_frame = source_frame;
@@ -890,9 +1069,12 @@ private:
 
         (void)ApplyOsdIfNeeded(source_frame.get(), &encoder_frame);
 
-        for (auto& branch : branches_) {
-            if (!branch.encoder->SubmitFrame(encoder_frame)) {
-                branch_submit_failures_.fetch_add(1, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(branches_mutex_);
+            for (auto& branch : branches_) {
+                if (!branch.encoder->SubmitFrame(encoder_frame)) {
+                    branch_submit_failures_.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
     }
@@ -900,6 +1082,7 @@ private:
     PipelineConfig config_{};
     std::unique_ptr<Demuxer> demuxer_;
     std::unique_ptr<codec::VideoDecoder> decoder_;
+    mutable std::mutex branches_mutex_;
     std::vector<OutputBranch> branches_;
     codec::VideoStreamInfo input_stream_{};
     std::atomic<bool> open_{false};

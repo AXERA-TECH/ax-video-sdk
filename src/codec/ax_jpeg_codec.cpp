@@ -30,6 +30,7 @@
 #endif
 
 #include "ax_image_internal.h"
+#include "ax_system_internal.h"
 #include "common/ax_image_processor.h"
 #include "common/ax_system.h"
 
@@ -304,6 +305,12 @@ common::AxImage::Ptr DecodeJpegBytes(const std::uint8_t* bytes,
         std::fprintf(stderr, "jpeg decode: system not initialized or input empty\n");
         return nullptr;
     }
+#if defined(AXSDK_PLATFORM_AXCL)
+    if (!common::internal::EnsureAxclThreadContext()) {
+        std::fprintf(stderr, "jpeg decode: EnsureAxclThreadContext failed\n");
+        return nullptr;
+    }
+#endif
 
     AX_U64 stream_phy_addr = 0;
     AX_VOID* stream_cpu_vir_addr = nullptr;
@@ -444,6 +451,11 @@ std::vector<std::uint8_t> EncodeJpegBytes(const common::AxImage& image,
     if (!common::IsSystemInitialized()) {
         return {};
     }
+#if defined(AXSDK_PLATFORM_AXCL)
+    if (!common::internal::EnsureAxclThreadContext()) {
+        return {};
+    }
+#endif
 
     auto working_image = PrepareJpegEncodeInput(image);
     if (!working_image) {
@@ -487,7 +499,21 @@ std::vector<std::uint8_t> EncodeJpegBytes(const common::AxImage& image,
     std::vector<std::uint8_t> encoded;
     const auto encode_ret = AX_VENC_JpegEncodeOneFrame(&encode_param);
     if (encode_ret == AX_SUCCESS && encode_param.u32Len != 0) {
+#if defined(AXSDK_PLATFORM_AXCL)
+        encoded.resize(encode_param.u32Len);
+        const auto copy_ret = axclrtMemcpy(encoded.data(),
+                                           reinterpret_cast<void*>(encode_param.ulPhyAddr),
+                                           encode_param.u32Len,
+                                           AXCL_MEMCPY_DEVICE_TO_HOST);
+        if (copy_ret != AXCL_SUCC) {
+            std::fprintf(stderr,
+                         "jpeg encode: axclrtMemcpy(D2H) failed ret=0x%x len=%u\n",
+                         copy_ret, encode_param.u32Len);
+            encoded.clear();
+        }
+#else
         encoded.assign(encode_param.pu8Addr, encode_param.pu8Addr + encode_param.u32Len);
+#endif
     } else if (encode_ret != AX_SUCCESS) {
         std::fprintf(stderr,
                      "jpeg encode: AX_VENC_JpegEncodeOneFrame failed ret=0x%x width=%u height=%u fmt=%d stride0=%u stride1=%u stream_buf=%u\n",
