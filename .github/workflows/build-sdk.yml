@@ -168,6 +168,7 @@ jobs:
           fi
           if [ -n "$TOOLCHAIN_BIN" ] && [ -d "$TOOLCHAIN_BIN" ]; then
             export AXSDK_TOOLCHAIN_BIN="$TOOLCHAIN_BIN"
+            export PATH="$TOOLCHAIN_BIN:$PATH"
           fi
           if [ -n "${{ matrix.toolchain_compiler }}" ] && ! command -v "${{ matrix.toolchain_compiler }}" >/dev/null 2>&1; then
             echo "missing compiler ${{ matrix.toolchain_compiler }} under $TOOLCHAIN_BASE" >&2
