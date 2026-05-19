@@ -105,7 +105,15 @@ if [[ -d "${TOOLCHAIN_BIN}" ]]; then
     export PATH="${TOOLCHAIN_BIN}:${PATH}"
 else
     # Best-effort auto-detect: allow CI scripts to extract toolchains without knowing the top-level directory name.
-    DETECTED_COMPILER="$(find "${ROOT_DIR}/.ci/toolchains" -maxdepth 5 -type f -name "${COMPILER_CHECK}" -print 2>/dev/null | head -n 1 || true)"
+    DETECTED_COMPILER="$(find "${ROOT_DIR}/.ci/toolchains" -maxdepth 5 \( -type f -o -type l \) -name "${COMPILER_CHECK}" -print 2>/dev/null | head -n 1 || true)"
+    if [[ "${DETECTED_COMPILER}" == */bin/${COMPILER_CHECK} ]]; then
+        TOOLCHAIN_BIN="${DETECTED_COMPILER%/${COMPILER_CHECK}}"
+        export PATH="${TOOLCHAIN_BIN}:${PATH}"
+    fi
+fi
+
+if ! command -v "${COMPILER_CHECK}" >/dev/null 2>&1; then
+    DETECTED_COMPILER="$(find "${ROOT_DIR}/.ci/toolchains" -maxdepth 5 \( -type f -o -type l \) -name "${COMPILER_CHECK}" -print 2>/dev/null | head -n 1 || true)"
     if [[ "${DETECTED_COMPILER}" == */bin/${COMPILER_CHECK} ]]; then
         TOOLCHAIN_BIN="${DETECTED_COMPILER%/${COMPILER_CHECK}}"
         export PATH="${TOOLCHAIN_BIN}:${PATH}"

@@ -23,6 +23,7 @@ jobs:
             toolchain_url: https://developer.arm.com/-/media/Files/downloads/gnu-a/9.2-2019.12/binrel/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu.tar.xz
             toolchain_archive: gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu.tar.xz
             toolchain_root: gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu
+            toolchain_compiler: aarch64-none-linux-gnu-g++
           - chip: ax630c
             script: ./build_ax630c.sh
             msp_zip: msp_20e_3.0.0.zip
@@ -31,6 +32,7 @@ jobs:
             toolchain_url: https://developer.arm.com/-/media/Files/downloads/gnu-a/9.2-2019.12/binrel/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu.tar.xz
             toolchain_archive: gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu.tar.xz
             toolchain_root: gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu
+            toolchain_compiler: aarch64-none-linux-gnu-g++
           - chip: ax620qp
             script: ./build_ax620qp.sh
             msp_zip: msp_20e_3.0.0.zip
@@ -39,6 +41,7 @@ jobs:
             toolchain_url: https://releases.linaro.org/components/toolchain/binaries/7.5-2019.12/arm-linux-gnueabihf/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz
             toolchain_archive: gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz
             toolchain_root: gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf
+            toolchain_compiler: arm-linux-gnueabihf-g++
           - chip: ax620q
             script: ./build_ax620q.sh
             msp_zip: msp_20e_3.0.0.zip
@@ -47,6 +50,7 @@ jobs:
             toolchain_url: https://github.com/AXERA-TECH/ax620q_bsp_sdk/releases/download/v2.0.0/arm-AX620E-linux-uclibcgnueabihf_V3_20240320.tgz
             toolchain_archive: arm-AX620E-linux-uclibcgnueabihf_V3_20240320.tgz
             toolchain_root: arm-AX620E-linux-uclibcgnueabihf
+            toolchain_compiler: arm-AX620E-linux-uclibcgnueabihf-g++
           - chip: axcl-x86_64
             script: ./build_axcl_x86.sh
             msp_zip: axcl_linux_3.10.2.zip
@@ -55,6 +59,7 @@ jobs:
             toolchain_url: ""
             toolchain_archive: ""
             toolchain_root: ""
+            toolchain_compiler: g++
           - chip: axcl-aarch64
             script: ./build_axcl_aarch64.sh
             msp_zip: axcl_linux_3.10.2.zip
@@ -63,6 +68,7 @@ jobs:
             toolchain_url: https://developer.arm.com/-/media/Files/downloads/gnu-a/9.2-2019.12/binrel/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu.tar.xz
             toolchain_archive: gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu.tar.xz
             toolchain_root: gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu
+            toolchain_compiler: aarch64-none-linux-gnu-g++
           - chip: axcl-riscv64
             script: ./build_axcl_riscv64.sh
             msp_zip: axcl_linux_riscv_3.14.0.zip
@@ -71,6 +77,7 @@ jobs:
             toolchain_url: https://github.com/ZHEQIUSHUI/assets/releases/download/risc-v/gcc-14.3-riscv64-unknown-linux-gnu-2.39.tar.xz
             toolchain_archive: gcc-14.3-riscv64-unknown-linux-gnu-2.39.tar.xz
             toolchain_root: gcc-14.3-riscv64-unknown-linux-gnu-2.39
+            toolchain_compiler: riscv64-unknown-linux-gnu-g++
 
     steps:
       - uses: actions/checkout@v6
@@ -111,12 +118,31 @@ jobs:
           set -euo pipefail
           TOOLCHAIN_BASE="${{ github.workspace }}/.ci/toolchains"
           mkdir -p "$TOOLCHAIN_BASE"
-          if [ ! -f "$TOOLCHAIN_BASE/$TOOLCHAIN_ARCHIVE" ]; then
-            curl -L "$TOOLCHAIN_URL" -o "$TOOLCHAIN_BASE/$TOOLCHAIN_ARCHIVE"
+          TOOLCHAIN_PATH="$TOOLCHAIN_BASE/$TOOLCHAIN_ARCHIVE"
+          validate_archive() {
+            case "$1" in
+              *.tar.xz) tar -tJf "$1" >/dev/null ;;
+              *.tgz|*.tar.gz) tar -tzf "$1" >/dev/null ;;
+              *.zip) unzip -tq "$1" >/dev/null ;;
+              *) return 0 ;;
+            esac
+          }
+          if [ -f "$TOOLCHAIN_PATH" ] && ! validate_archive "$TOOLCHAIN_PATH"; then
+            rm -f "$TOOLCHAIN_PATH"
+          fi
+          if [ ! -f "$TOOLCHAIN_PATH" ]; then
+            curl -fL --retry 3 --retry-delay 1 --connect-timeout 20 "$TOOLCHAIN_URL" -o "$TOOLCHAIN_PATH"
           fi
           case "$TOOLCHAIN_ARCHIVE" in
             *.tar.xz|*.tgz|*.tar.gz)
-              tar -xf "$TOOLCHAIN_BASE/$TOOLCHAIN_ARCHIVE" -C "$TOOLCHAIN_BASE"
+              rm -rf "$TOOLCHAIN_BASE/${{ matrix.toolchain_root }}"
+              if ! tar -xf "$TOOLCHAIN_PATH" -C "$TOOLCHAIN_BASE"; then
+                echo "toolchain extract failed, redownloading once" >&2
+                rm -f "$TOOLCHAIN_PATH"
+                curl -fL --retry 3 --retry-delay 1 --connect-timeout 20 "$TOOLCHAIN_URL" -o "$TOOLCHAIN_PATH"
+                rm -rf "$TOOLCHAIN_BASE/${{ matrix.toolchain_root }}"
+                tar -xf "$TOOLCHAIN_PATH" -C "$TOOLCHAIN_BASE"
+              fi
               ;;
             *)
               echo "unsupported toolchain archive: $TOOLCHAIN_ARCHIVE" >&2
@@ -125,11 +151,29 @@ jobs:
           esac
 
       - name: Build
-        env:
-          AXSDK_MSP_ZIP_PATH: ${{ github.workspace }}/.ci/downloads/${{ matrix.msp_zip }}
-          AXSDK_TOOLCHAIN_BIN: ${{ github.workspace }}/.ci/toolchains/${{ matrix.toolchain_root }}/bin
         run: |
+          set -euo pipefail
           chmod +x ./build_ax650.sh ./build_ax630c.sh ./build_ax620q.sh ./build_ax620qp.sh ./build_axcl_x86.sh ./build_axcl_aarch64.sh ./build_axcl_riscv64.sh ./scripts/build_common.sh
+          export AXSDK_MSP_ZIP_PATH="${{ github.workspace }}/.ci/downloads/${{ matrix.msp_zip }}"
+          TOOLCHAIN_BASE="${{ github.workspace }}/.ci/toolchains"
+          TOOLCHAIN_BIN=""
+          if [ -n "${{ matrix.toolchain_root }}" ]; then
+            TOOLCHAIN_BIN="${TOOLCHAIN_BASE}/${{ matrix.toolchain_root }}/bin"
+          fi
+          if [ -n "${{ matrix.toolchain_compiler }}" ] && ! command -v "${{ matrix.toolchain_compiler }}" >/dev/null 2>&1; then
+            DETECTED_COMPILER="$(find "$TOOLCHAIN_BASE" -maxdepth 5 \( -type f -o -type l \) -name "${{ matrix.toolchain_compiler }}" -print 2>/dev/null | head -n 1 || true)"
+            if [ -n "$DETECTED_COMPILER" ]; then
+              TOOLCHAIN_BIN="${DETECTED_COMPILER%/${{ matrix.toolchain_compiler }}}"
+            fi
+          fi
+          if [ -n "$TOOLCHAIN_BIN" ] && [ -d "$TOOLCHAIN_BIN" ]; then
+            export AXSDK_TOOLCHAIN_BIN="$TOOLCHAIN_BIN"
+          fi
+          if [ -n "${{ matrix.toolchain_compiler }}" ] && ! command -v "${{ matrix.toolchain_compiler }}" >/dev/null 2>&1; then
+            echo "missing compiler ${{ matrix.toolchain_compiler }} under $TOOLCHAIN_BASE" >&2
+            find "$TOOLCHAIN_BASE" -maxdepth 4 \( -type f -o -type l \) -name "${{ matrix.toolchain_compiler }}" -print >&2 || true
+            exit 1
+          fi
           ${{ matrix.script }}
 
       - name: Upload Artifact
