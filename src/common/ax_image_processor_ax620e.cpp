@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <mutex>
 #include <vector>
@@ -185,6 +186,55 @@ AX_U32 AlignDownEven(AX_U32 v) noexcept {
     return (v & 1U) ? (v - 1U) : v;
 }
 
+struct LetterboxRect {
+    AX_U32 x{0};
+    AX_U32 y{0};
+    AX_U32 w{0};
+    AX_U32 h{0};
+};
+
+LetterboxRect ComputeLetterboxRect(const ImageProcessRequest& request,
+                                   AX_U32 src_w,
+                                   AX_U32 src_h,
+                                   AX_U32 dst_w,
+                                   AX_U32 dst_h) noexcept {
+    LetterboxRect rect{};
+    if (src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0) {
+        return rect;
+    }
+
+    const std::uint64_t lhs = static_cast<std::uint64_t>(src_w) * static_cast<std::uint64_t>(dst_h);
+    const std::uint64_t rhs = static_cast<std::uint64_t>(src_h) * static_cast<std::uint64_t>(dst_w);
+    if (lhs >= rhs) {
+        rect.w = dst_w;
+        rect.h = static_cast<AX_U32>((static_cast<std::uint64_t>(src_h) * dst_w) / src_w);
+    } else {
+        rect.h = dst_h;
+        rect.w = static_cast<AX_U32>((static_cast<std::uint64_t>(src_w) * dst_h) / src_h);
+    }
+
+    rect.w = std::max<AX_U32>(2, AlignDownEven(std::max<AX_U32>(1, std::min(rect.w, dst_w))));
+    rect.h = std::max<AX_U32>(2, AlignDownEven(std::max<AX_U32>(1, std::min(rect.h, dst_h))));
+
+    const AX_U32 pad_w = dst_w - rect.w;
+    const AX_U32 pad_h = dst_h - rect.h;
+    auto AlignOffset = [](AX_U32 pad, ResizeAlign a) -> AX_U32 {
+        switch (a) {
+        case ResizeAlign::kStart:
+            return 0;
+        case ResizeAlign::kEnd:
+            return pad;
+        case ResizeAlign::kCenter:
+        default:
+            return pad / 2U;
+        }
+    };
+
+    rect.x = AlignOffset(pad_w, request.resize.horizontal_align);
+    rect.y = AlignOffset(pad_h, request.resize.vertical_align);
+    return rect;
+}
+
 AX_IVPS_ASPECT_RATIO_T MakeKeepAspectRatioManual(const ImageProcessRequest& request,
                                                  AX_U32 src_w,
                                                  AX_U32 src_h,
@@ -204,47 +254,11 @@ AX_IVPS_ASPECT_RATIO_T MakeKeepAspectRatioManual(const ImageProcessRequest& requ
         return aspect_ratio;
     }
 
-    // Compute the letterbox rect deterministically (avoid IVPS AUTO inconsistencies across MSP versions).
-    AX_U32 resized_w = 0;
-    AX_U32 resized_h = 0;
-    const std::uint64_t lhs = static_cast<std::uint64_t>(src_w) * static_cast<std::uint64_t>(dst_h);
-    const std::uint64_t rhs = static_cast<std::uint64_t>(src_h) * static_cast<std::uint64_t>(dst_w);
-    if (lhs >= rhs) {
-        // Width-limited.
-        resized_w = dst_w;
-        resized_h = static_cast<AX_U32>((static_cast<std::uint64_t>(src_h) * dst_w) / src_w);
-    } else {
-        // Height-limited.
-        resized_h = dst_h;
-        resized_w = static_cast<AX_U32>((static_cast<std::uint64_t>(src_w) * dst_h) / src_h);
-    }
-
-    resized_w = std::max<AX_U32>(1, std::min(resized_w, dst_w));
-    resized_h = std::max<AX_U32>(1, std::min(resized_h, dst_h));
-
-    // NV12 needs even rect size/offset to keep UV aligned; safe for RGB/BGR too.
-    resized_w = std::max<AX_U32>(2, AlignDownEven(resized_w));
-    resized_h = std::max<AX_U32>(2, AlignDownEven(resized_h));
-
-    const AX_U32 pad_w = dst_w - resized_w;
-    const AX_U32 pad_h = dst_h - resized_h;
-
-    auto AlignOffset = [](AX_U32 pad, ResizeAlign a) -> AX_U32 {
-        switch (a) {
-        case ResizeAlign::kStart:
-            return 0;
-        case ResizeAlign::kEnd:
-            return pad;
-        case ResizeAlign::kCenter:
-        default:
-            return pad / 2U;
-        }
-    };
-
-    aspect_ratio.tRect.nX = AlignOffset(pad_w, request.resize.horizontal_align);
-    aspect_ratio.tRect.nY = AlignOffset(pad_h, request.resize.vertical_align);
-    aspect_ratio.tRect.nW = resized_w;
-    aspect_ratio.tRect.nH = resized_h;
+    const auto rect = ComputeLetterboxRect(request, src_w, src_h, dst_w, dst_h);
+    aspect_ratio.tRect.nX = rect.x;
+    aspect_ratio.tRect.nY = rect.y;
+    aspect_ratio.tRect.nW = rect.w;
+    aspect_ratio.tRect.nH = rect.h;
     return aspect_ratio;
 }
 
@@ -429,6 +443,12 @@ public:
             request.enable_crop || source.width() != destination.width() || source.height() != destination.height();
         const bool needs_format_change = source.format() != destination.format();
 
+        if (request.resize.mode == ResizeMode::kKeepAspectRatio &&
+            (destination.format() == PixelFormat::kRgb24 || destination.format() == PixelFormat::kBgr24) &&
+            (needs_geometry_change || needs_format_change)) {
+            return ProcessKeepAspectRgbViaTemp(source, request, destination);
+        }
+
         if (!needs_geometry_change && needs_format_change) {
             const auto ret = AX_IVPS_CscTdp(&src_frame, dst_frame);
             if (ret != AX_SUCCESS) {
@@ -574,6 +594,65 @@ public:
     }
 
 private:
+    bool ProcessKeepAspectRgbViaTemp(const AxImage& source, const ImageProcessRequest& request, AxImage& destination) {
+        const AX_U32 src_w = request.enable_crop ? request.crop.width : source.width();
+        const AX_U32 src_h = request.enable_crop ? request.crop.height : source.height();
+        const auto rect = ComputeLetterboxRect(request, src_w, src_h, destination.width(), destination.height());
+        if (rect.w == 0 || rect.h == 0) {
+            return false;
+        }
+
+        ImageDescriptor temp_descriptor{};
+        temp_descriptor.format = destination.format();
+        temp_descriptor.width = destination.width();
+        temp_descriptor.height = destination.height();
+        temp_descriptor.strides[0] = AlignUp(static_cast<std::size_t>(destination.width()) * 3U,
+                                             kDefaultStrideAlignment * 3U);
+
+        ImageAllocationOptions options{};
+        options.memory_type = MemoryType::kCmm;
+        options.cache_mode = CacheMode::kCached;
+        options.alignment = 0x1000;
+        options.token = "AxImageProcessorLetterboxTmp";
+        auto temp = AxImage::Create(temp_descriptor, options);
+        if (!temp) {
+            return false;
+        }
+
+        ImageProcessRequest stretch_request = request;
+        stretch_request.output_image = temp_descriptor;
+        stretch_request.resize.mode = ResizeMode::kStretch;
+        if (!Process(source, stretch_request, *temp)) {
+            return false;
+        }
+
+        if (!FillBackground(destination, request.resize.background_color)) {
+            return false;
+        }
+        if (!temp->InvalidateCache() || !destination.InvalidateCache()) {
+            return false;
+        }
+
+        const auto* src = temp->plane_data(0);
+        auto* dst = destination.mutable_plane_data(0);
+        if (src == nullptr || dst == nullptr) {
+            return false;
+        }
+
+        const std::size_t dst_x_bytes = static_cast<std::size_t>(rect.x) * 3U;
+        for (std::size_t row = 0; row < rect.h; ++row) {
+            const std::size_t src_y = (row * temp->height()) / rect.h;
+            const auto* src_row = src + src_y * temp->stride(0);
+            auto* dst_row = dst + (static_cast<std::size_t>(rect.y) + row) * destination.stride(0) + dst_x_bytes;
+            for (std::size_t col = 0; col < rect.w; ++col) {
+                const std::size_t src_x = (col * temp->width()) / rect.w;
+                std::memcpy(dst_row + col * 3U, src_row + src_x * 3U, 3U);
+            }
+        }
+
+        return destination.FlushCache();
+    }
+
     struct PoolHandle {
         explicit PoolHandle(AX_POOL pool_id) noexcept : id(pool_id) {}
 
