@@ -469,7 +469,23 @@ public:
             attr.eSclType = AX_IVPS_SCL_TYPE_AUTO;
             attr.eSclInput = AX_IVPS_SCL_INPUT_MONOPOLY;
             attr.nAlpha = 255;
-            const auto ret = AX_IVPS_CropResizeVpp(&src_frame_for_processing, dst_frame, &attr);
+            // VPP on AX620E only accepts NV12 source; AX_IVPS_CropResizeVpp
+            // returns 0x800d010a for RGB24/BGR24 inputs. TDP supports the
+            // packed-RGB path. Try TDP for RGB/BGR first, fall back to VPP
+            // for NV12, with a VPP retry if TDP returns an error for any
+            // reason on the RGB branch.
+            const bool packed_rgb = (source.format() == PixelFormat::kRgb24 ||
+                                     source.format() == PixelFormat::kBgr24);
+            auto ret = packed_rgb
+                ? AX_IVPS_CropResizeTdp(&src_frame_for_processing, dst_frame, &attr)
+                : AX_IVPS_CropResizeVpp(&src_frame_for_processing, dst_frame, &attr);
+            if (ret != AX_SUCCESS && packed_rgb) {
+                // Some MSP versions of TDP refuse specific src/dst combinations.
+                // VPP will almost certainly also fail here (since the format
+                // is RGB), but try it for diagnostic completeness — the error
+                // message below will pin down the failing engine.
+                ret = AX_IVPS_CropResizeVpp(&src_frame_for_processing, dst_frame, &attr);
+            }
             if (ret != AX_SUCCESS) {
                 std::fprintf(stderr,
                              "ax620e image processor: crop/resize failed ret=0x%x src_fmt=%d dst_fmt=%d src=%ux%u dst=%ux%u crop=%d\n",
