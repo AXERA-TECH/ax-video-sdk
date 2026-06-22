@@ -295,6 +295,14 @@ if(AXSDK_BUILD_SMOKE_TESTS)
         EXTRA_INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/src/common
     )
 
+    add_executable(ax_image_stride_smoke
+        tools/ax_image_stride_smoke.cpp
+    )
+    axsdk_configure_internal_tool(ax_image_stride_smoke
+        LINK_AX_MSP
+        EXTRA_INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/src/common
+    )
+
     add_executable(ax_osd_draw_smoke
         tools/ax_osd_draw_smoke.cpp
     )
