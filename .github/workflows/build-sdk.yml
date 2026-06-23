@@ -138,14 +138,24 @@ jobs:
           if [ ! -f "$TOOLCHAIN_PATH" ]; then
             curl -fL --retry 3 --retry-delay 1 --connect-timeout 20 "$TOOLCHAIN_URL" -o "$TOOLCHAIN_PATH"
           fi
+          # Some toolchains (notably the AX620E uclibc .tgz) ship with
+          # chmod 555 directories — actions/cache restores those perms, and a
+          # plain `rm -rf` then fails with "Permission denied" because we
+          # can't unlink children of a read-only parent. chmod u+rwX first.
+          safe_rm_toolchain() {
+            local dir="$1"
+            [ -d "$dir" ] || return 0
+            chmod -R u+rwX "$dir" 2>/dev/null || true
+            rm -rf "$dir"
+          }
           case "$TOOLCHAIN_ARCHIVE" in
             *.tar.xz|*.tgz|*.tar.gz|*.tar)
-              rm -rf "$TOOLCHAIN_BASE/${{ matrix.toolchain_root }}"
+              safe_rm_toolchain "$TOOLCHAIN_BASE/${{ matrix.toolchain_root }}"
               if ! tar -xf "$TOOLCHAIN_PATH" -C "$TOOLCHAIN_BASE"; then
                 echo "toolchain extract failed, redownloading once" >&2
                 rm -f "$TOOLCHAIN_PATH"
                 curl -fL --retry 3 --retry-delay 1 --connect-timeout 20 "$TOOLCHAIN_URL" -o "$TOOLCHAIN_PATH"
-                rm -rf "$TOOLCHAIN_BASE/${{ matrix.toolchain_root }}"
+                safe_rm_toolchain "$TOOLCHAIN_BASE/${{ matrix.toolchain_root }}"
                 tar -xf "$TOOLCHAIN_PATH" -C "$TOOLCHAIN_BASE"
               fi
               ;;
