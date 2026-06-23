@@ -37,9 +37,13 @@ jobs:
             script: ./build_ax620qp.sh
             msp_zip: msp_20e_3.0.0.zip
             msp_url: https://github.com/ZHEQIUSHUI/assets/releases/download/ax_3.6.2/msp_20e_3.0.0.zip
-            toolchain_pkg: unzip xz-utils
-            toolchain_url: https://releases.linaro.org/components/toolchain/binaries/7.5-2019.12/arm-linux-gnueabihf/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz
-            toolchain_archive: gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz
+            toolchain_pkg: unzip
+            # releases.linaro.org / snapshots.linaro.org hang from GitHub
+            # Actions runners. ZHEQIUSHUI/assets re-uploads the identical
+            # Linaro 7.5 toolchain as an uncompressed .tar from the GitHub
+            # release CDN, which is reachable.
+            toolchain_url: https://github.com/ZHEQIUSHUI/assets/releases/download/arm-gcc/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar
+            toolchain_archive: gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar
             toolchain_root: gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf
             toolchain_compiler: arm-linux-gnueabihf-g++
           - chip: ax620q
@@ -123,6 +127,7 @@ jobs:
             case "$1" in
               *.tar.xz) tar -tJf "$1" >/dev/null ;;
               *.tgz|*.tar.gz) tar -tzf "$1" >/dev/null ;;
+              *.tar) tar -tf "$1" >/dev/null ;;
               *.zip) unzip -tq "$1" >/dev/null ;;
               *) return 0 ;;
             esac
@@ -133,14 +138,24 @@ jobs:
           if [ ! -f "$TOOLCHAIN_PATH" ]; then
             curl -fL --retry 3 --retry-delay 1 --connect-timeout 20 "$TOOLCHAIN_URL" -o "$TOOLCHAIN_PATH"
           fi
+          # Some toolchains (notably the AX620E uclibc .tgz) ship with
+          # chmod 555 directories — actions/cache restores those perms, and a
+          # plain `rm -rf` then fails with "Permission denied" because we
+          # can't unlink children of a read-only parent. chmod u+rwX first.
+          safe_rm_toolchain() {
+            local dir="$1"
+            [ -d "$dir" ] || return 0
+            chmod -R u+rwX "$dir" 2>/dev/null || true
+            rm -rf "$dir"
+          }
           case "$TOOLCHAIN_ARCHIVE" in
-            *.tar.xz|*.tgz|*.tar.gz)
-              rm -rf "$TOOLCHAIN_BASE/${{ matrix.toolchain_root }}"
+            *.tar.xz|*.tgz|*.tar.gz|*.tar)
+              safe_rm_toolchain "$TOOLCHAIN_BASE/${{ matrix.toolchain_root }}"
               if ! tar -xf "$TOOLCHAIN_PATH" -C "$TOOLCHAIN_BASE"; then
                 echo "toolchain extract failed, redownloading once" >&2
                 rm -f "$TOOLCHAIN_PATH"
                 curl -fL --retry 3 --retry-delay 1 --connect-timeout 20 "$TOOLCHAIN_URL" -o "$TOOLCHAIN_PATH"
-                rm -rf "$TOOLCHAIN_BASE/${{ matrix.toolchain_root }}"
+                safe_rm_toolchain "$TOOLCHAIN_BASE/${{ matrix.toolchain_root }}"
                 tar -xf "$TOOLCHAIN_PATH" -C "$TOOLCHAIN_BASE"
               fi
               ;;
