@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -359,10 +360,11 @@ public:
             }
         }
 
+        const bool osd_debug = (std::getenv("AXVSDK_OSD_DEBUG") != nullptr);
+        std::size_t rect_skipped = 0;
         for (const auto& rect : rects_) {
-            if (!FitsAxCoordinate(rect.x) || !FitsAxCoordinate(rect.y) || !FitsAxSize(rect.width) ||
-                !FitsAxSize(rect.height)) {
-                return false;
+            if (rect.width == 0 || rect.height == 0) {
+                continue;  // nothing to draw
             }
 
             auto attr = MakeGdiAttr(rect.thickness, rect.alpha, rect.color, rect.filled);
@@ -372,14 +374,55 @@ public:
                 attr.tCornerRect.nVerLength = rect.corner_vertical_length;
             }
 
-            AX_IVPS_RECT_T ax_rect{};
-            ax_rect.nX = static_cast<AX_S16>(rect.x);
-            ax_rect.nY = static_cast<AX_S16>(rect.y);
-            ax_rect.nW = static_cast<AX_U16>(rect.width);
-            ax_rect.nH = static_cast<AX_U16>(rect.height);
-            if (AX_IVPS_DrawRect(&canvas, attr, ax_rect) != AX_SUCCESS) {
-                return false;
+            // Sanitize rectangle geometry inside the SDK so callers can pass raw detection
+            // coordinates (off-screen, over-sized, or covering the whole frame) without having to
+            // pre-clamp anything. AX650 strokes the border of width nThick *outward* around the
+            // rectangle edges and requires the whole stroked rectangle to stay inside the canvas, so
+            // a full-frame or edge-touching box is otherwise rejected with
+            // AX_ERR_IVPS_RGN_ILLEGAL_PARAM (0x800d020a). Clamp each rect into the canvas leaving a
+            // border-thickness margin on every side. 64-bit math keeps out-of-range inputs safe.
+            const std::int64_t margin = static_cast<std::int64_t>(rect.thickness);
+            const std::int64_t canvas_w = static_cast<std::int64_t>(canvas.nW);
+            const std::int64_t canvas_h = static_cast<std::int64_t>(canvas.nH);
+            const std::int64_t rx0 = std::max<std::int64_t>(rect.x, margin);
+            const std::int64_t ry0 = std::max<std::int64_t>(rect.y, margin);
+            const std::int64_t rx1 =
+                std::min<std::int64_t>(static_cast<std::int64_t>(rect.x) + rect.width, canvas_w - margin);
+            const std::int64_t ry1 =
+                std::min<std::int64_t>(static_cast<std::int64_t>(rect.y) + rect.height, canvas_h - margin);
+            if (rx1 - rx0 < 1 || ry1 - ry0 < 1) {
+                ++rect_skipped;  // rectangle lies (almost) entirely outside the canvas
+                if (osd_debug) {
+                    std::fprintf(stderr,
+                                 "osd ax650: rect fully outside canvas, skip: x=%d y=%d w=%u h=%u "
+                                 "thick=%u canvas{w=%u h=%u}\n",
+                                 rect.x, rect.y, rect.width, rect.height, rect.thickness, canvas.nW, canvas.nH);
+                }
+                continue;
             }
+
+            AX_IVPS_RECT_T ax_rect{};
+            ax_rect.nX = static_cast<AX_S16>(rx0);
+            ax_rect.nY = static_cast<AX_S16>(ry0);
+            ax_rect.nW = static_cast<AX_U16>(rx1 - rx0);
+            ax_rect.nH = static_cast<AX_U16>(ry1 - ry0);
+            // Defensive backstop: if MSP still rejects a rectangle for any reason, skip only that
+            // rectangle instead of blanking the entire frame's overlay.
+            const AX_S32 ret = AX_IVPS_DrawRect(&canvas, attr, ax_rect);
+            if (ret != AX_SUCCESS) {
+                ++rect_skipped;
+                if (osd_debug) {
+                    std::fprintf(stderr,
+                                 "osd ax650: AX_IVPS_DrawRect ret=0x%x, skip rect{x=%d y=%d w=%u h=%u "
+                                 "thick=%u} canvas{w=%u h=%u fmt=%d}\n",
+                                 static_cast<unsigned>(ret), rect.x, rect.y, rect.width, rect.height,
+                                 rect.thickness, canvas.nW, canvas.nH, static_cast<int>(canvas.eFormat));
+                }
+                continue;
+            }
+        }
+        if (osd_debug && rect_skipped != 0) {
+            std::fprintf(stderr, "osd ax650: %zu/%zu rects skipped this frame\n", rect_skipped, rects_.size());
         }
 
         return image.FlushCache();
