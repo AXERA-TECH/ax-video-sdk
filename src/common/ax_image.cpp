@@ -31,38 +31,34 @@ namespace {
 
 constexpr std::size_t kRgbChannels = 3;
 
-AX_U32 ToAxPicStride(PixelFormat format, std::size_t byte_stride) noexcept {
-#if defined(AXSDK_PLATFORM_AXCL)
-    (void)format;
-    return static_cast<AX_U32>(byte_stride);
+// u32PicStride convention for packed RGB/BGR differs by platform:
+//   * AX620E-family on-device IVPS treats it as PIXELS-per-line.
+//   * AX650 on-device IVPS and AXCL treat it as BYTES-per-line.
+// NV12 (and everything else) is always bytes-per-line.
+// NOTE: this lives in the shared ax_image.cpp, so the branch MUST key off the
+// chip macro, not a coarse "AXCL vs everything-else" split -- otherwise an
+// AX620E-only change silently changes AX650 too (regression history: f573b6e
+// set AX650 to byte, e122ef5 reverted it for AX650 via the shared #else).
+constexpr bool RgbStrideInPixels() noexcept {
+#if defined(AXSDK_CHIP_AX620E_FAMILY)
+    return true;
 #else
-    switch (format) {
-    case PixelFormat::kRgb24:
-    case PixelFormat::kBgr24:
-        return static_cast<AX_U32>(byte_stride / kRgbChannels);
-    case PixelFormat::kNv12:
-    case PixelFormat::kUnknown:
-    default:
-        return static_cast<AX_U32>(byte_stride);
-    }
+    return false;
 #endif
 }
 
-std::size_t FromAxPicStride(PixelFormat format, AX_U32 pic_stride) noexcept {
-#if defined(AXSDK_PLATFORM_AXCL)
-    (void)format;
-    return static_cast<std::size_t>(pic_stride);
-#else
-    switch (format) {
-    case PixelFormat::kRgb24:
-    case PixelFormat::kBgr24:
-        return static_cast<std::size_t>(pic_stride) * kRgbChannels;
-    case PixelFormat::kNv12:
-    case PixelFormat::kUnknown:
-    default:
-        return static_cast<std::size_t>(pic_stride);
+AX_U32 ToAxPicStride(PixelFormat format, std::size_t byte_stride) noexcept {
+    if ((format == PixelFormat::kRgb24 || format == PixelFormat::kBgr24) && RgbStrideInPixels()) {
+        return static_cast<AX_U32>(byte_stride / kRgbChannels);
     }
-#endif
+    return static_cast<AX_U32>(byte_stride);
+}
+
+std::size_t FromAxPicStride(PixelFormat format, AX_U32 pic_stride) noexcept {
+    if ((format == PixelFormat::kRgb24 || format == PixelFormat::kBgr24) && RgbStrideInPixels()) {
+        return static_cast<std::size_t>(pic_stride) * kRgbChannels;
+    }
+    return static_cast<std::size_t>(pic_stride);
 }
 
 std::size_t PlaneCountForFormat(PixelFormat format) noexcept {
