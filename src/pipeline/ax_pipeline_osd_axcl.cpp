@@ -30,7 +30,14 @@ AX_IVPS_GDI_ATTR_T MakeGdiAttr(std::uint16_t thickness,
     AX_IVPS_GDI_ATTR_T attr{};
     attr.nThick = thickness;
     attr.nAlpha = alpha;
-    attr.nColor = color;
+    // AX IVPS GDI 的 nColor 实测按 0xGGBBRR 解释(传 0xRRGGBB 的绿会画成蓝)。
+    // API 对外保持 0xRRGGBB(见 ax_drawer.h),在此转换成硬件语义。
+    {
+        const std::uint32_t r = (color >> 16) & 0xFFU;
+        const std::uint32_t g = (color >> 8) & 0xFFU;
+        const std::uint32_t b = color & 0xFFU;
+        attr.nColor = (g << 16) | (b << 8) | r;
+    }
     attr.bSolid = filled ? AX_TRUE : AX_FALSE;
     attr.bAbsCoo = AX_FALSE;
     return attr;
