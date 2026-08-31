@@ -126,6 +126,22 @@ message(STATUS "${AXSDK_AX_RUNTIME_NAME} enabled for ${AXSDK_CHIP_TYPE_NORMALIZE
 message(STATUS "AX SDK includes: ${AXSDK_MSP_INCLUDE_DIR}")
 message(STATUS "AX SDK libs: ${AXSDK_MSP_LIB_DIR}")
 
+# 从编译所用 SDK 库里提取版本号烧进二进制,启动时与运行环境对比(见 ax_version_check.h)。
+# 提取失败时宏为空,检查退化为放行,不会阻断构建。
+set(AXSDK_BSP_VERSION_OVERRIDE "" CACHE STRING "Override detected BSP version (testing only)")
+if(AXSDK_BSP_VERSION_OVERRIDE)
+    set(AXSDK_BSP_COMPILED_VERSION "${AXSDK_BSP_VERSION_OVERRIDE}")
+elseif(AXSDK_CHIP_TYPE_NORMALIZED STREQUAL "axcl")
+    execute_process(
+        COMMAND bash -c "strings '${AXSDK_MSP_LIB_DIR}/libaxcl_rt.so' 2>/dev/null | grep -E '^V[0-9]+\\.[0-9]+\\.[0-9]+$' | head -1"
+        TIMEOUT 10 OUTPUT_VARIABLE AXSDK_BSP_COMPILED_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE)
+else()
+    execute_process(
+        COMMAND bash -c "strings '${AXSDK_MSP_LIB_DIR}/libax_sys.so' 2>/dev/null | grep '\\[Axera version\\]' | head -1 | awk '{print $4}'"
+        TIMEOUT 10 OUTPUT_VARIABLE AXSDK_BSP_COMPILED_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE)
+endif()
+message(STATUS "AX BSP compiled version: ${AXSDK_BSP_COMPILED_VERSION}")
+
 add_library(ax_video_sdk ${AXSDK_LIBRARY_TYPE}
     src/codec/ax_jpeg_codec.cpp
     src/common/ax_drawer.cpp
@@ -133,6 +149,7 @@ add_library(ax_video_sdk ${AXSDK_LIBRARY_TYPE}
     src/common/ax_image_copy.cpp
     src/common/ax_image_processor.cpp
     src/common/ax_system.cpp
+    src/common/ax_version_check.cpp
     src/codec/ax_mp4_demuxer.cpp
     src/codec/ax_video_decoder.cpp
     src/codec/ax_video_encoder.cpp
@@ -167,6 +184,9 @@ else()
             src/pipeline/ax_pipeline_osd_ax620e.cpp
     )
 endif()
+
+target_compile_definitions(ax_video_sdk PRIVATE
+    AXVSDK_BSP_COMPILED_VERSION="${AXSDK_BSP_COMPILED_VERSION}")
 
 add_library(ax_video_sdk::ax_video_sdk ALIAS ax_video_sdk)
 
