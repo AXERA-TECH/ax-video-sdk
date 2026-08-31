@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <memory>
@@ -311,6 +312,12 @@ public:
 
         internal::UpdateCodecConfig(packet_codec, packet.data, &output_vps_, &output_sps_, &output_pps_);
         if (!publisher_.isRecording()) {
+            // 断链重连:服务器重启后 publisher 会被探活打回未连接,这里按 backoff 重试。
+            // 断开期间丢帧是预期行为(直播语义),返回 true 不算错误。
+            const auto now = std::chrono::steady_clock::now();
+            if (now < next_connect_attempt_) {
+                return true;
+            }
             if (!packet.key_frame ||
                 !internal::HasCodecConfig(packet_codec, output_vps_, output_sps_, output_pps_)) {
                 return true;
@@ -328,20 +335,33 @@ public:
             media_info.control_track = "streamid=0";
 
             if (!publisher_.isConnected() && !publisher_.open(publisher_url_)) {
+                next_connect_attempt_ = now + kReconnectBackoff;
                 return false;
             }
             if (!publisher_.announce(media_info) || !publisher_.setup() || !publisher_.record()) {
+                // 握手半途失败必须整条连接重置再从 open 来过:同一连接上重发 ANNOUNCE
+                // 会被服务器按 RTSP 状态机直接踢掉(如 mediamtx "must be in state [initial]")。
+                publisher_.closeWithTimeout(200);
+                next_connect_attempt_ = now + kReconnectBackoff;
                 return false;
             }
         }
 
         const auto pts_ms = pts_unwrapper_.ToMonotonicPtsMs(packet.pts);
-        return packet_codec == codec::VideoCodecType::kH265
-                   ? publisher_.pushH265Data(packet.data.data(), packet.data.size(), pts_ms, packet.key_frame)
-                   : publisher_.pushH264Data(packet.data.data(), packet.data.size(), pts_ms, packet.key_frame);
+        const bool pushed =
+            packet_codec == codec::VideoCodecType::kH265
+                ? publisher_.pushH265Data(packet.data.data(), packet.data.size(), pts_ms, packet.key_frame)
+                : publisher_.pushH264Data(packet.data.data(), packet.data.size(), pts_ms, packet.key_frame);
+        if (!pushed && !publisher_.isRecording()) {
+            // 探活判死:进入重连窗口,下一个 key frame 起重新握手
+            next_connect_attempt_ = std::chrono::steady_clock::now() + kReconnectBackoff;
+        }
+        return pushed;
     }
 
 private:
+    static constexpr auto kReconnectBackoff = std::chrono::seconds(2);
+
     codec::VideoStreamInfo stream_{};
     rtsp::RtspPublisher publisher_;
     std::string publisher_url_;
@@ -349,6 +369,7 @@ private:
     std::vector<std::uint8_t> output_vps_;
     std::vector<std::uint8_t> output_sps_;
     std::vector<std::uint8_t> output_pps_;
+    std::chrono::steady_clock::time_point next_connect_attempt_{};
 };
 
 std::unique_ptr<PacketSink> OpenElementaryStreamFileSink(const std::string& uri) {
