@@ -133,7 +133,7 @@ if(AXSDK_BSP_VERSION_OVERRIDE)
     set(AXSDK_BSP_COMPILED_VERSION "${AXSDK_BSP_VERSION_OVERRIDE}")
 elseif(AXSDK_CHIP_TYPE_NORMALIZED STREQUAL "axcl")
     execute_process(
-        COMMAND bash -c "strings '${AXSDK_MSP_LIB_DIR}/libaxcl_rt.so' 2>/dev/null | grep -E '^V[0-9]+\\.[0-9]+\\.[0-9]+$' | head -1"
+        COMMAND bash -c "strings '${AXSDK_MSP_LIB_DIR}/libaxcl_rt.so' 2>/dev/null | grep -E '^V[0-9]+\\.[0-9]+\\.[0-9]+(_[0-9]+)?$' | head -1"
         TIMEOUT 10 OUTPUT_VARIABLE AXSDK_BSP_COMPILED_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE)
 else()
     execute_process(
