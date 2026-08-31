@@ -75,9 +75,13 @@ BspVersionReport CheckBspVersion() {
     rep.enforce = false;
     std::int32_t major = 0, minor = 0, patch = 0;
     if (axclrtGetVersion(&major, &minor, &patch) == 0) {
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "V%d.%d.%d", major, minor, patch);
-        rep.runtime = buf;
+        // 部分 AXCL runtime 没有填真实版本,axclrtGetVersion 返回占位的 1.0.0——
+        // 与编译版本比较无意义,当作"拿不到"处理(实测见于 aarch64 3.10.x 环境)
+        if (!(major == 1 && minor == 0 && patch == 0)) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "V%d.%d.%d", major, minor, patch);
+            rep.runtime = buf;
+        }
     }
 #else
     rep.enforce = true;
