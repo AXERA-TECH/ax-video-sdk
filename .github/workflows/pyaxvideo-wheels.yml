@@ -1,0 +1,57 @@
+name: pyaxvideo wheels
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "pyaxvideo-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  wheels:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download AXCL SDK (x86 + arm64) and AX650 MSP
+        run: |
+          mkdir -p deps-dl && cd deps-dl
+          curl -sL -o axcl.zip https://github.com/ZHEQIUSHUI/assets/releases/download/ax_3.6.2/axcl_linux_3.10.2.zip
+          unzip -q axcl.zip
+          curl -sL -o msp.zip https://github.com/ZHEQIUSHUI/assets/releases/download/ax_3.6.2/msp_50_3.10.2.zip
+          unzip -q msp.zip
+
+      - name: Download aarch64 toolchain
+        run: |
+          curl -sL -o tc.tar.xz https://developer.arm.com/-/media/Files/downloads/gnu-a/9.2-2019.12/binrel/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu.tar.xz
+          tar xJf tc.tar.xz
+          echo "$PWD/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu/bin" >> "$GITHUB_PATH"
+
+      - name: Build wheels
+        run: |
+          pip install -q setuptools wheel
+          cd pyaxvideo
+          AXCL_ROOT=$(find "$GITHUB_WORKSPACE/deps-dl" -maxdepth 3 -type d -name "axcl_linux_x86" | head -1)
+          AXCL_ARM64=$(find "$GITHUB_WORKSPACE/deps-dl" -maxdepth 3 -type d -name "axcl_linux_arm64" | head -1)
+          MSP_ROOT=$(find "$GITHUB_WORKSPACE/deps-dl" -maxdepth 3 -type d -name msp | head -1)
+          AXCL_X86_DIR="$AXCL_ROOT" ./scripts/build_wheels.sh x86
+          TOOLCHAIN_FILE="$GITHUB_WORKSPACE/toolchains/aarch64-none-linux-gnu.toolchain.cmake" \
+            MSP_DIR="$MSP_ROOT" AXCL_ARM64_DIR="$AXCL_ARM64" ./scripts/build_wheels.sh aarch64
+          ls -la dist/
+
+      - name: Upload wheels to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pyaxvideo/dist/*.whl
+
+      - name: Upload artifacts (non-tag runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyaxvideo-wheels
+          path: pyaxvideo/dist/*.whl

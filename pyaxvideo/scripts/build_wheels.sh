@@ -21,7 +21,7 @@ build_capi() { # <build_dir> <extra cmake args...>
 
 case "${1:-x86}" in
 x86)
-    build_capi build_capi_x86 -DAXSDK_CHIP_TYPE=axcl
+    build_capi build_capi_x86 -DAXSDK_CHIP_TYPE=axcl ${AXCL_X86_DIR:+-DAXSDK_AXCL_DIR=$AXCL_X86_DIR}
     cp "$SDK"/build_capi_x86/libaxvideo_capi_axcl.so "$NATIVE"/
     PLAT=linux_x86_64
     ;;
