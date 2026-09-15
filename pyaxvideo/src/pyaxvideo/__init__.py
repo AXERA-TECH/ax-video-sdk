@@ -17,7 +17,7 @@ from ._frame import DeviceFrame, FMT_NV12, FMT_RGB24, FMT_BGR24, _fmt_from_str
 from ._reader import VideoReader
 from ._writer import VideoWriter
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = [
     "init", "deinit", "backend", "VideoReader", "VideoWriter", "DeviceFrame",
     "frame_from_numpy", "decode_jpeg",

@@ -314,20 +314,22 @@ common::AxImage::Ptr DecodeJpegBytes(const std::uint8_t* bytes,
 
     AX_U64 stream_phy_addr = 0;
     AX_VOID* stream_cpu_vir_addr = nullptr;
-#if defined(AXSDK_PLATFORM_AXCL)
-    // AXCL: JPEG bitstream lives on host; use pinned host memory for DMA.
-    const auto host_ret = axclrtMallocHost(&stream_cpu_vir_addr, size);
-    if (host_ret != AXCL_SUCC || stream_cpu_vir_addr == nullptr) {
-        std::fprintf(stderr, "jpeg decode: axclrtMallocHost stream failed ret=0x%x size=%zu\n", host_ret, size);
-        return nullptr;
-    }
-    std::memcpy(stream_cpu_vir_addr, bytes, size);
-#else
+    // 码流必须在 VDEC 可达的 CMM 里:AXCL 下 VDEC 在卡上,host 内存(PhyAddr=0)
+    // 会被驱动按非法参数拒绝(ret=0x8008010a)。
     if (AX_SYS_MemAlloc(&stream_phy_addr, &stream_cpu_vir_addr, static_cast<AX_U32>(size), 0x100,
                         reinterpret_cast<const AX_S8*>("JpegDecodeStream")) != AX_SUCCESS) {
         std::fprintf(stderr, "jpeg decode: AX_SYS_MemAlloc stream failed size=%zu\n", size);
         return nullptr;
     }
+#if defined(AXSDK_PLATFORM_AXCL)
+    // AXCL 的 CMM 虚拟地址 host 不可写,以物理地址为 device 指针拷贝上卡
+    if (axclrtMemcpy(reinterpret_cast<void*>(stream_phy_addr), bytes, size,
+                     AXCL_MEMCPY_HOST_TO_DEVICE) != AXCL_SUCC) {
+        std::fprintf(stderr, "jpeg decode: stream upload failed size=%zu\n", size);
+        (void)AX_SYS_MemFree(stream_phy_addr, stream_cpu_vir_addr);
+        return nullptr;
+    }
+#else
     std::memcpy(stream_cpu_vir_addr, bytes, size);
 #endif
 
@@ -335,11 +337,7 @@ common::AxImage::Ptr DecodeJpegBytes(const std::uint8_t* bytes,
     std::uint32_t jpeg_height = 0;
     if (!ParseJpegDimensions(bytes, size, &jpeg_width, &jpeg_height)) {
         std::fprintf(stderr, "jpeg decode: ParseJpegDimensions failed size=%zu\n", size);
-#if defined(AXSDK_PLATFORM_AXCL)
-        (void)axclrtFreeHost(stream_cpu_vir_addr);
-#else
         (void)AX_SYS_MemFree(stream_phy_addr, stream_cpu_vir_addr);
-#endif
         return nullptr;
     }
 
@@ -353,22 +351,14 @@ common::AxImage::Ptr DecodeJpegBytes(const std::uint8_t* bytes,
     if (!native) {
         std::fprintf(stderr, "jpeg decode: native image alloc failed width=%u height=%u\n",
                      jpeg_width, jpeg_height);
-#if defined(AXSDK_PLATFORM_AXCL)
-        (void)axclrtFreeHost(stream_cpu_vir_addr);
-#else
         (void)AX_SYS_MemFree(stream_phy_addr, stream_cpu_vir_addr);
-#endif
         return nullptr;
     }
 
     auto* native_frame = common::internal::AxImageAccess::MutableAxFrame(native.get());
     if (native_frame == nullptr) {
         std::fprintf(stderr, "jpeg decode: native frame access failed\n");
-#if defined(AXSDK_PLATFORM_AXCL)
-        (void)axclrtFreeHost(stream_cpu_vir_addr);
-#else
         (void)AX_SYS_MemFree(stream_phy_addr, stream_cpu_vir_addr);
-#endif
         return nullptr;
     }
 
@@ -377,7 +367,9 @@ common::AxImage::Ptr DecodeJpegBytes(const std::uint8_t* bytes,
     decode_param.stStream.pu8Addr = static_cast<AX_U8*>(stream_cpu_vir_addr);
     decode_param.stStream.u32StreamPackLen = static_cast<AX_U32>(size);
     decode_param.stFrame = *native_frame;
-#if defined(AXSDK_CHIP_AX650)
+#if defined(AXSDK_CHIP_AX650) || defined(AXSDK_PLATFORM_AXCL)
+    // AXCL 走的同样是 AX650 的 VDEC:这两个字段不设(为 0)会被驱动按非法参数拒绝
+    // (JpegDecodeOneFrame ret=0x8008010a, ILLEGAL_PARAM)
     decode_param.enOutputMode = AX_VDEC_OUTPUT_ORIGINAL;
     decode_param.enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR;
 #endif
@@ -388,20 +380,12 @@ common::AxImage::Ptr DecodeJpegBytes(const std::uint8_t* bytes,
                      "jpeg decode: JpegDecodeOneFrame failed ret=0x%x width=%u height=%u stride=%u fmt=%d\n",
                      decode_ret, jpeg_width, jpeg_height,
                      native_frame->u32PicStride[0], static_cast<int>(decode_param.stFrame.enImgFormat));
-#if defined(AXSDK_PLATFORM_AXCL)
-        (void)axclrtFreeHost(stream_cpu_vir_addr);
-#else
         (void)AX_SYS_MemFree(stream_phy_addr, stream_cpu_vir_addr);
-#endif
         return nullptr;
     }
 
     *native_frame = decode_param.stFrame;
-#if defined(AXSDK_PLATFORM_AXCL)
-    (void)axclrtFreeHost(stream_cpu_vir_addr);
-#else
     (void)AX_SYS_MemFree(stream_phy_addr, stream_cpu_vir_addr);
-#endif
     return PostProcessDecodedImage(native, options);
 }
 

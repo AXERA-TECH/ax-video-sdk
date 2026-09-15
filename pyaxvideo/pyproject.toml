@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyaxvideo"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python bindings for ax-video-sdk: hardware video decode/encode/JPEG/image-processing on AXERA chips (AXCL & AX650)"
 readme = "README.md"
 requires-python = ">=3.8"

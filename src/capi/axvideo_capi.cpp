@@ -168,7 +168,7 @@ const char* axv_backend(void) {
 #endif
 }
 
-const char* axv_version(void) { return "0.1.0"; }
+const char* axv_version(void) { return "0.1.1"; }
 
 const char* axv_last_error(void) { return t_last_error.c_str(); }
 

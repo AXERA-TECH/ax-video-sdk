@@ -68,9 +68,6 @@ axv.frame_from_numpy(arr)        # numpy → 设备帧((h,w,3) BGR 或 NV12)
 axv.backend()                    # "axcl" / "ax650"
 ```
 
-> 已知问题:`decode_jpeg` 当前仅板端(ax650)可用,AXCL 后端的 JPEG 硬解码路径
-> 尚未打通(编码 `to_jpeg` 两端都正常)。
-
 `VideoReader(..., latest_only=True)` 实时算法只要最新帧;`realtime=True` 文件按源帧率
 节奏送(模拟实时流);`loop=True` 循环播放。
 
