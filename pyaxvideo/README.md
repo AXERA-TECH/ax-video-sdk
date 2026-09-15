@@ -8,12 +8,16 @@ ax-video-sdk 的 Python 绑定:在 AXERA 芯片上用 Python 跑**全硬件视�
 
 ## 安装
 
-从 [Releases](https://github.com/AXERA-TECH/ax-video-sdk/releases) 下载对应平台的 whl:
+whl 固定发布在 [`pyaxvideo-latest`](https://github.com/AXERA-TECH/ax-video-sdk/releases/tag/pyaxvideo-latest)(rolling,链接永久有效,内容随 main 更新):
 
 ```bash
-pip install pyaxvideo-*-py3-none-linux_x86_64.whl     # x86 主机 + AXCL 卡
-pip install pyaxvideo-*-py3-none-linux_aarch64.whl    # aarch64(AXCL / AX650 板端)
+# x86 主机 + AXCL 卡
+pip install https://github.com/AXERA-TECH/ax-video-sdk/releases/download/pyaxvideo-latest/pyaxvideo-0.1.1-py3-none-linux_x86_64.whl
+# aarch64(AXCL 卡 / AX650 板端)
+pip install https://github.com/AXERA-TECH/ax-video-sdk/releases/download/pyaxvideo-latest/pyaxvideo-0.1.1-py3-none-linux_aarch64.whl
 ```
+
+> 更新到最新构建:重跑上面的命令加 `--force-reinstall --no-deps`(版本号不自增,pip 不会自动认为有更新)。
 
 板端无 pip 的裁剪系统:whl 就是 zip,`python3 -m zipfile -e xxx.whl site/` 解开后把
 `site/pyaxvideo-*.data/purelib/pyaxvideo` 挪到 `site/` 下,`PYTHONPATH=site` 即可用(numpy 同理)。

@@ -1,10 +1,22 @@
 name: pyaxvideo wheels
 
+# Rolling 发布:构建产物覆盖上传到固定 tag `pyaxvideo-latest` 的 prerelease,
+# 版本号不自增,whl 文件名固定 → 下载链接永久有效:
+#   https://github.com/AXERA-TECH/ax-video-sdk/releases/download/pyaxvideo-latest/pyaxvideo-0.1.1-py3-none-linux_x86_64.whl
+#   https://github.com/AXERA-TECH/ax-video-sdk/releases/download/pyaxvideo-latest/pyaxvideo-0.1.1-py3-none-linux_aarch64.whl
 on:
   workflow_dispatch:
   push:
-    tags:
-      - "pyaxvideo-v*"
+    branches:
+      - main
+      - master
+    paths:
+      - "pyaxvideo/**"
+      - "src/**"
+      - "include/**"
+      - "third-party/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/pyaxvideo-wheels.yml"
 
 permissions:
   contents: write
@@ -43,15 +55,12 @@ jobs:
             MSP_DIR="$MSP_ROOT" AXCL_ARM64_DIR="$AXCL_ARM64" ./scripts/build_wheels.sh aarch64
           ls -la dist/
 
-      - name: Upload wheels to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: pyaxvideo/dist/*.whl
-
-      - name: Upload artifacts (non-tag runs)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: pyaxvideo-wheels
-          path: pyaxvideo/dist/*.whl
+      - name: Publish to rolling release (fixed links)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view pyaxvideo-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create pyaxvideo-latest --repo "$GITHUB_REPOSITORY" --prerelease \
+              --title "pyaxvideo (rolling)" \
+              --notes "Rolling build of the pyaxvideo wheels from main. Assets are overwritten on every update; download links are permanent."
+          gh release upload pyaxvideo-latest pyaxvideo/dist/*.whl --repo "$GITHUB_REPOSITORY" --clobber
