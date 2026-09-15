@@ -892,7 +892,7 @@ bool DetectDemuxerInputType(const std::string& uri, DemuxerInputType* type) noex
 
         if (scheme == "file") {
             const auto file_path = StripUriQueryAndFragment(normalized.substr(scheme_pos + 3U));
-            if (EndsWithIgnoreCase(file_path, ".mp4")) {
+            if (EndsWithIgnoreCase(file_path, ".mp4") || EndsWithIgnoreCase(file_path, ".mov")) {
                 *type = DemuxerInputType::kMp4File;
                 return true;
             }
@@ -901,7 +901,9 @@ bool DetectDemuxerInputType(const std::string& uri, DemuxerInputType* type) noex
     }
 
     const auto path = StripUriQueryAndFragment(normalized);
-    if (EndsWithIgnoreCase(path, ".mp4")) {
+    // .mov 与 .mp4 同为 ISO BMFF/QuickTime 家族,minimp4 可直接解
+    // (含 iPhone 实拍 HEVC + mebx 元数据 track,已实测)
+    if (EndsWithIgnoreCase(path, ".mp4") || EndsWithIgnoreCase(path, ".mov")) {
         *type = DemuxerInputType::kMp4File;
         return true;
     }
