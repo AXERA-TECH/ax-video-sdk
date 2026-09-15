@@ -1,0 +1,5 @@
+build/
+dist/
+*.egg-info/
+src/pyaxvideo/_native/*.so
+__pycache__/

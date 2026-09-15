@@ -219,6 +219,34 @@ if(AXSDK_CHIP_TYPE_NORMALIZED STREQUAL "axcl" AND CMAKE_CXX_COMPILER_ID MATCHES 
     target_link_options(ax_video_sdk PRIVATE -Wl,--allow-shlib-undefined)
 endif()
 
+# ---------- C ABI 封装(语言绑定用,默认不编) ----------
+option(AXSDK_BUILD_CAPI "Build the C ABI wrapper library (for pyaxvideo etc.)" OFF)
+if(AXSDK_BUILD_CAPI)
+    add_library(axvideo_capi SHARED src/capi/axvideo_capi.cpp)
+    target_include_directories(axvideo_capi PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(axvideo_capi PRIVATE
+        ax_video_sdk::ax_video_sdk
+        ax_video_sdk::ax_msp
+        ${AXSDK_COMMON_LIBS})
+    target_compile_features(axvideo_capi PRIVATE cxx_std_17)
+    # 每个后端一个 so,pyaxvideo 按运行环境选择加载
+    set_target_properties(axvideo_capi PROPERTIES
+        OUTPUT_NAME "axvideo_capi_${AXSDK_CHIP_TYPE_NORMALIZED}"
+        CXX_EXTENSIONS OFF)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        # MSP/AXCL 运行库在目标机才有,链接期允许未决符号
+        target_link_options(axvideo_capi PRIVATE -Wl,--allow-shlib-undefined)
+    endif()
+    if(NOT AXSDK_CHIP_TYPE_NORMALIZED STREQUAL "axcl")
+        # 板端 MSP 库不在默认 ld 路径且多无 SONAME:烧 DT_RPATH(传递生效),
+        # ctypes 直接 dlopen 本库即可解析全部 MSP 依赖,无需用户设 LD_LIBRARY_PATH
+        target_link_options(axvideo_capi PRIVATE
+            -Wl,--disable-new-dtags -Wl,-rpath,/soc/lib:/opt/lib)
+    endif()
+endif()
+
 function(axsdk_configure_internal_tool target)
     set(options LINK_AX_MSP LINK_RTSP)
     set(oneValueArgs "")
