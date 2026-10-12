@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +21,8 @@
 #include "common/ax_drawer.h"
 #include "common/ax_image.h"
 #include "common/ax_image_processor.h"
+
+#include "ax_motion_roi.h"
 
 #if defined(AXSDK_PLATFORM_AXCL)
 #include "axcl_rt_device.h"
@@ -320,6 +323,22 @@ public:
         drawer_ = common::internal::CreatePlatformDrawer();
         decoded_frames_.store(0, std::memory_order_relaxed);
         frame_seq_.store(0, std::memory_order_relaxed);
+        if (config_.motion_roi.enable) {
+            // 网格默认取原图 1/8(1080p -> 240x136)。这个上限是实测出来的硬约束:
+            // IVPS 单次缩放到 1/16 会直接失败,到 1/32 更会把 IVPS 卡死,
+            // 所以把降采样倍率钳在 8 倍以内。网格偏细只是略增噪点敏感度,
+            // 而 ROI 本来就追求过量覆盖,无害。NV12 要求偶数边长。
+            auto even = [](std::uint32_t v) { return v < 2 ? 2U : (v & ~1U); };
+            const auto min_cols = (input_stream_.width + 7) / 8;
+            const auto min_rows = (input_stream_.height + 7) / 8;
+            const auto cols = even(std::max(min_cols, config_.motion_roi.grid_cols));
+            const auto rows = even(std::max(min_rows, config_.motion_roi.grid_rows));
+            motion_failures_ = 0;
+            if (!motion_.Reset(cols, rows, input_stream_.width, input_stream_.height,
+                               config_.motion_roi)) {
+                std::fprintf(stderr, "pipeline: motion roi init failed (grid %ux%u)\n", cols, rows);
+            }
+        }
         det_source_seq_.store(0, std::memory_order_relaxed);
         det_lag_frames_.store(0, std::memory_order_relaxed);
         det_lag_frames_max_.store(0, std::memory_order_relaxed);
@@ -343,6 +362,15 @@ public:
 
         if (!open_) {
             return;
+        }
+
+        motion_.Clear();
+        motion_frame_.reset();
+        motion_host_.clear();
+        {
+            std::lock_guard<std::mutex> lock(roi_mutex_);
+            det_rois_.clear();
+            motion_rois_.clear();
         }
 
         if (decoder_) {
@@ -547,8 +575,29 @@ public:
     }
 
     void SetQpRoi(const std::vector<codec::QpRoiRect>& rois) override {
+        {
+            std::lock_guard<std::mutex> lock(roi_mutex_);
+            det_rois_ = rois;
+        }
+        PushCombinedRois();
+    }
+
+    // 最终 ROI = 检测框 ∪ 运动区域。检测框保住"认识的目标",
+    // 运动区域兜住"检测器不认识但在动的东西",后者否则会被当背景糊掉。
+    void PushCombinedRois() {
+        std::vector<codec::QpRoiRect> rois;
+        {
+            std::lock_guard<std::mutex> lock(roi_mutex_);
+            rois = det_rois_;
+            rois.insert(rois.end(), motion_rois_.begin(), motion_rois_.end());
+        }
+        PushRoisToEncoders(rois);
+    }
+
+    void PushRoisToEncoders(const std::vector<codec::QpRoiRect>& rois) {
         const auto src_w = input_stream_.width;
         const auto src_h = input_stream_.height;
+        if (src_w == 0 || src_h == 0) return;
         std::lock_guard<std::mutex> lock(branches_mutex_);
         for (auto& branch : branches_) {
             if (!branch.encoder || !branch.config.qpmap.enable) continue;
@@ -1061,6 +1110,90 @@ private:
         }
     }
 
+    // 连续失败就关掉运动检测:静默地每帧失败是最糟的结果(功能没生效却毫无提示)。
+    void NoteMotionFailure(const char* stage) {
+        if (++motion_failures_ < 3) return;
+        std::fprintf(stderr,
+                     "pipeline: motion roi disabled after repeated %s failures (grid %ux%u)\n",
+                     stage, motion_.cols(), motion_.rows());
+        motion_.Clear();
+        motion_frame_.reset();
+        std::lock_guard<std::mutex> lock(roi_mutex_);
+        motion_rois_.clear();
+    }
+
+    // 把整帧缩成很小的灰度网格做帧差。缩放走 IVPS(硬件),读回的只有几 KB。
+    void UpdateMotionRoi(const common::AxImage& source) {
+        if (!motion_.valid() || !EnsureFrameProcessor()) return;
+
+        if (!motion_frame_) {
+            common::ImageDescriptor desc{};
+            desc.format = common::PixelFormat::kNv12;
+            desc.width = motion_.cols();
+            desc.height = motion_.rows();
+            common::ImageAllocationOptions alloc{};
+            alloc.memory_type = common::MemoryType::kCmm;
+            alloc.token = "MotionRoi";
+            motion_frame_ = common::AxImage::Create(desc, alloc);
+            if (!motion_frame_) { NoteMotionFailure("alloc"); return; }
+        }
+
+        common::ImageProcessRequest request{};
+        request.output_image = motion_frame_->descriptor();
+        {
+            // ImageProcessor 非线程安全,而 FrameCallbackLoop 也在用它,必须共用同一把锁
+            std::lock_guard<std::mutex> lock(frame_processor_mutex_);
+            if (!frame_processor_ || !frame_processor_->Process(source, request, *motion_frame_)) {
+                NoteMotionFailure("ivps resize");
+                return;
+            }
+        }
+
+        const auto stride = motion_frame_->stride(0);
+        const auto bytes = stride * motion_.rows();
+        if (motion_host_.size() < bytes) motion_host_.resize(bytes);
+#if defined(AXSDK_PLATFORM_AXCL)
+        if (!common::internal::EnsureAxclThreadContext(config_.device_id)) return;
+        if (axclrtMemcpy(motion_host_.data(),
+                         reinterpret_cast<void*>(motion_frame_->physical_address(0)),
+                         bytes, AXCL_MEMCPY_DEVICE_TO_HOST) != AXCL_SUCC) {
+            NoteMotionFailure("readback");
+            return;
+        }
+#else
+        motion_frame_->InvalidateCache();
+        const auto* src = motion_frame_->plane_data(0);
+        if (src == nullptr) return;
+        std::memcpy(motion_host_.data(), src, bytes);
+#endif
+        motion_failures_ = 0;
+        motion_.Update(motion_host_.data(), stride);
+        auto rects = motion_.rects();
+        if (const char* dbg = std::getenv("AXVSDK_MOTION_DEBUG"); dbg != nullptr && dbg[0] == '1') {
+            static std::atomic<std::uint64_t> n{0};
+            if ((n.fetch_add(1) % 30) == 0) {
+                std::uint64_t sum = 0;
+                std::uint8_t lo = 255, hi = 0;
+                for (std::uint32_t r = 0; r < motion_.rows(); ++r) {
+                    for (std::uint32_t c = 0; c < motion_.cols(); ++c) {
+                        const auto v = motion_host_[r * stride + c];
+                        sum += v; lo = std::min(lo, v); hi = std::max(hi, v);
+                    }
+                }
+                std::fprintf(stderr,
+                             "motion: grid=%ux%u stride=%zu luma avg=%llu min=%u max=%u rects=%zu\n",
+                             motion_.cols(), motion_.rows(), stride,
+                             (unsigned long long)(sum / (motion_.cols() * motion_.rows())),
+                             lo, hi, rects.size());
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(roi_mutex_);
+            motion_rois_ = std::move(rects);
+        }
+        PushCombinedRois();
+    }
+
     void FanoutFrame(common::AxImage::Ptr frame) {
         if (!frame) {
             return;
@@ -1082,6 +1215,12 @@ private:
             while (lag > prev_max &&
                    !det_lag_frames_max_.compare_exchange_weak(prev_max, lag, std::memory_order_relaxed)) {
             }
+        }
+
+        if (config_.motion_roi.enable && motion_.valid()) {
+            const auto interval = config_.motion_roi.detect_interval == 0
+                                      ? 1U : config_.motion_roi.detect_interval;
+            if ((frame_seq % interval) == 0) UpdateMotionRoi(*frame);
         }
 
         // Publish the raw decoded frame to callback/GetLatestFrame first. OSD is applied only on
@@ -1151,6 +1290,14 @@ private:
     // 二者之差就是"这组框相对当前画面过期了几帧"。
     std::atomic<std::uint64_t> frame_seq_{0};
     std::atomic<std::uint64_t> det_source_seq_{0};
+
+    mutable std::mutex roi_mutex_;
+    std::vector<codec::QpRoiRect> det_rois_;
+    std::vector<codec::QpRoiRect> motion_rois_;
+    internal::MotionRoiDetector motion_;
+    int motion_failures_{0};
+    common::AxImage::Ptr motion_frame_;
+    std::vector<std::uint8_t> motion_host_;
     std::atomic<std::uint64_t> det_lag_frames_{0};
     std::atomic<std::uint64_t> det_lag_frames_max_{0};
     std::atomic<std::uint64_t> branch_submit_failures_{0};

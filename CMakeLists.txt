@@ -155,6 +155,7 @@ add_library(ax_video_sdk ${AXSDK_LIBRARY_TYPE}
     src/codec/ax_video_decoder.cpp
     src/codec/ax_video_encoder.cpp
     src/pipeline/ax_demuxer.cpp
+    src/pipeline/ax_motion_roi.cpp
     src/pipeline/ax_muxer.cpp
     src/pipeline/ax_pipeline.cpp
     src/pipeline/ax_pipeline_manager.cpp

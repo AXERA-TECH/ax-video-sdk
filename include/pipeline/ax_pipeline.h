@@ -49,6 +49,23 @@ struct PipelineFrameOutputConfig {
     common::ResizeOptions resize{};
 };
 
+// 运动区域并入 ROI。检测器只认识它训练过的类别,画面里其它运动物体
+// (动物、落物、晃动的招牌…)若只靠检测框会被当背景用高 QP 糊掉。
+// 开销:每 detect_interval 帧一次 IVPS 缩图 + 一次极小的 host 帧差。
+struct MotionRoiOptions {
+    bool enable{false};
+    // 网格尺寸,0 = 自动(原图 1/16,正好对齐 QPMAP 单元)。
+    // 会被钳到不低于 1/16:IVPS 单次缩放做不到更高倍率。
+    std::uint32_t grid_cols{0};
+    std::uint32_t grid_rows{0};
+    // 格子亮度差超过它算运动(0~255)。
+    std::uint32_t sensitivity{12};
+    // 命中后保持多少帧,既防闪烁也顺带覆盖目标的去向。
+    std::uint32_t hold_frames{15};
+    // 每隔几帧算一次。运动区域变化慢,不必逐帧。
+    std::uint32_t detect_interval{3};
+};
+
 struct PipelineConfig {
     // AXCL 下建议显式指定 device_id；同一个 Pipeline 只绑定一张卡。
     std::int32_t device_id{-1};
@@ -57,6 +74,8 @@ struct PipelineConfig {
     std::vector<PipelineOutputConfig> outputs;
     // 控制对外 latest frame / frame callback 的输出格式和尺寸。
     PipelineFrameOutputConfig frame_output{};
+    // 运动区域并入 QPMAP 的 ROI(仅对开启了 qpmap 的输出分支有意义)。
+    MotionRoiOptions motion_roi{};
 };
 
 struct PipelineStats {
