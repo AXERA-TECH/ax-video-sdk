@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <memory>
 #include <atomic>
 #include <thread>
@@ -76,6 +77,40 @@ public:
         Close();
     }
 
+    // 这颗芯片上 qpmap 回退成 CBR,QP 闭环不起作用;运行时目标(compression_ratio 每秒
+    // 按实测输入码率算一次)就直接改硬件 CBR 码率。变化不到 5% 不下发,免得输入码率
+    // 的正常抖动让码控每秒都被打断一次。
+    void SetTargetBitrateKbps(std::uint32_t kbps) override {
+        AxVideoEncoderBase::SetTargetBitrateKbps(kbps);
+        if (kbps == 0 || channel_ < 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(rc_mutex_);
+        if (applied_kbps_ != 0) {
+            const double change = static_cast<double>(kbps) / static_cast<double>(applied_kbps_);
+            if (change > 0.95 && change < 1.05) {
+                return;
+            }
+        }
+        AX_VENC_RC_PARAM_T rc{};
+        if (AX_VENC_GetRcParam(channel_, &rc) != AX_SUCCESS) {
+            return;
+        }
+        if (rc.enRcMode == AX_VENC_RC_MODE_H264CBR) {
+            rc.stH264Cbr.u32BitRate = kbps;
+        } else if (rc.enRcMode == AX_VENC_RC_MODE_H265CBR) {
+            rc.stH265Cbr.u32BitRate = kbps;
+        } else {
+            return;
+        }
+        if (AX_VENC_SetRcParam(channel_, &rc) == AX_SUCCESS) {
+            applied_kbps_ = kbps;
+        } else if (!rc_warned_) {
+            rc_warned_ = true;
+            std::fprintf(stderr, "ax620e venc: AX_VENC_SetRcParam failed, compression_ratio stays at the open-time bitrate\n");
+        }
+    }
+
 protected:
     bool CreateBackend(const ResolvedVideoEncoderConfig& config) override {
         const auto payload = ToAxPayload(config.codec);
@@ -121,6 +156,11 @@ protected:
             return false;
         }
 
+        {
+            std::lock_guard<std::mutex> lock(rc_mutex_);
+            applied_kbps_ = config.bitrate_kbps;
+            rc_warned_ = false;
+        }
         return true;
     }
 
@@ -231,6 +271,9 @@ protected:
 private:
     VENC_CHN channel_{-1};
     bool started_{false};
+    std::mutex rc_mutex_;
+    std::uint32_t applied_kbps_{0};
+    bool rc_warned_{false};
 };
 
 }  // namespace

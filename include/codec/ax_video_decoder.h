@@ -31,7 +31,12 @@ enum class FrameCallbackMode {
     kLatest = 0,
     // Deliver frames in-order using an internal bounded queue.
     // If the callback is too slow, the oldest frames are dropped to avoid blocking decode.
+    // Drops are counted (VideoDecoder::GetDroppedFrames).
     kQueue = 1,
+    // Same in-order queue, but a full queue blocks the decoder instead of dropping:
+    // lossless, for offline transcode of files. Don't use it on live sources (RTSP) --
+    // the backpressure ends up in the network receive path.
+    kQueueBlocking = 2,
 };
 
 class VideoDecoder {
@@ -63,6 +68,9 @@ public:
     // 高级接口：选择回调帧投递策略。
     // 默认 kLatest 更符合 “获取最新一帧” 语义；pipeline 需要完整帧序列时可用 kQueue。
     virtual void SetFrameCallback(FrameCallback callback, FrameCallbackMode mode) = 0;
+
+    // 回调队列因消费方太慢而丢掉的帧数(kLatest / kQueue 模式下会发生)。
+    virtual std::uint64_t GetDroppedFrames() const noexcept { return 0; }
 };
 
 std::unique_ptr<VideoDecoder> CreateVideoDecoder();

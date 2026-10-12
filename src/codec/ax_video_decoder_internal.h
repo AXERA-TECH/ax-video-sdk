@@ -30,6 +30,7 @@ public:
     bool GetLatestFrame(common::AxImage& output_image) override;
     void SetFrameCallback(FrameCallback callback) override;
     void SetFrameCallback(FrameCallback callback, FrameCallbackMode mode) override;
+    std::uint64_t GetDroppedFrames() const noexcept override;
 
 protected:
     virtual bool CreateBackend(const Mp4VideoInfo& video_info) = 0;
@@ -77,6 +78,8 @@ private:
 
     std::mutex callback_mutex_;
     std::condition_variable callback_cv_;
+    std::condition_variable callback_space_cv_;  // kQueueBlocking:队列腾出空位
+    std::atomic<std::uint64_t> dropped_callback_frames_{0};
     FrameCallback frame_callback_;
     FrameCallbackMode callback_mode_{FrameCallbackMode::kLatest};
     common::AxImage::Ptr pending_callback_frame_;

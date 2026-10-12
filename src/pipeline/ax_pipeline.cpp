@@ -355,10 +355,18 @@ public:
         demux_stop_ = false;
         open_ = true;
 
+        // 离线文件(不按节奏播放)要一帧不丢:回调队列满了就让解码等着,
+        // 背压一路传到 demux,反正文件读多快都行。实时源(RTSP、按节奏播放的文件)
+        // 不能这样,背压会堵到网络收包 / 播放节奏上,宁可丢最旧的帧(会计数)。
+        DemuxerInputType input_type{};
+        const bool offline_file =
+            !config_.input.realtime_playback &&
+            DetectDemuxerInputType(config_.input.uri, &input_type) &&
+            input_type == DemuxerInputType::kMp4File;
         decoder_->SetFrameCallback([this](common::AxImage::Ptr frame) {
             decoded_frames_.fetch_add(1, std::memory_order_relaxed);
             FanoutFrame(std::move(frame));
-        }, codec::FrameCallbackMode::kQueue);
+        }, offline_file ? codec::FrameCallbackMode::kQueueBlocking : codec::FrameCallbackMode::kQueue);
         return true;
     }
 
@@ -667,6 +675,7 @@ public:
         stats.det_lag_frames = det_lag_frames_.load(std::memory_order_relaxed);
         stats.det_lag_frames_max = det_lag_frames_max_.load(std::memory_order_relaxed);
         stats.input_bitrate_kbps = input_bitrate_kbps_.load(std::memory_order_relaxed);
+        stats.decode_dropped_frames = decoder_ ? decoder_->GetDroppedFrames() : 0;
         stats.motion_coverage_percent = motion_coverage_percent_.load(std::memory_order_relaxed);
         {
             std::lock_guard<std::mutex> lock(branches_mutex_);

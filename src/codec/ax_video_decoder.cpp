@@ -128,6 +128,7 @@ bool AxVideoDecoderBase::Start() {
     send_finished_ = false;
     stop_requested_ = false;
     callback_stop_ = false;
+    dropped_callback_frames_.store(0, std::memory_order_relaxed);
 
     if (!StartBackend()) {
         return false;
@@ -148,6 +149,7 @@ void AxVideoDecoderBase::Stop() noexcept {
     stop_requested_ = true;
     input_cv_.notify_all();
     callback_cv_.notify_all();
+    callback_space_cv_.notify_all();
 
     if (send_thread_.joinable()) {
         send_thread_.join();
@@ -233,6 +235,11 @@ void AxVideoDecoderBase::SetFrameCallback(FrameCallback callback, FrameCallbackM
     pending_callback_frame_.reset();
     callback_queue_.clear();
     callback_cv_.notify_all();
+    callback_space_cv_.notify_all();
+}
+
+std::uint64_t AxVideoDecoderBase::GetDroppedFrames() const noexcept {
+    return dropped_callback_frames_.load(std::memory_order_relaxed);
 }
 
 const Mp4VideoInfo& AxVideoDecoderBase::video_info() const noexcept {
@@ -347,6 +354,7 @@ void AxVideoDecoderBase::CallbackLoop() {
                 }
             }
         }
+        callback_space_cv_.notify_one();
 
         if (callback && frame) {
             callback(std::move(frame));
@@ -413,14 +421,30 @@ void AxVideoDecoderBase::PublishFrame(const AX_VIDEO_FRAME_INFO_T& frame_info) {
     }
 
     {
-        std::lock_guard<std::mutex> lock(callback_mutex_);
+        std::unique_lock<std::mutex> lock(callback_mutex_);
         if (frame_callback_) {
             if (callback_mode_ == FrameCallbackMode::kLatest) {
+                if (pending_callback_frame_) {
+                    dropped_callback_frames_.fetch_add(1, std::memory_order_relaxed);
+                }
                 pending_callback_frame_ = published_frame;
+            } else if (callback_mode_ == FrameCallbackMode::kQueueBlocking) {
+                // 无损:等消费方腾出空位。stop 时放行,免得 Stop() 卡在 join。
+                callback_space_cv_.wait(lock, [this] {
+                    return stop_requested_ || callback_stop_ ||
+                           callback_queue_.size() < kCallbackQueueDepth ||
+                           callback_mode_ != FrameCallbackMode::kQueueBlocking;
+                });
+                if (stop_requested_ || callback_stop_) {
+                    return;
+                }
+                callback_queue_.push_back(published_frame);
             } else {
                 callback_queue_.push_back(published_frame);
                 if (callback_queue_.size() > kCallbackQueueDepth) {
+                    // 以前这里是静默丢弃,丢了多少帧无从得知。
                     callback_queue_.pop_front();
+                    dropped_callback_frames_.fetch_add(1, std::memory_order_relaxed);
                 }
             }
             callback_cv_.notify_one();

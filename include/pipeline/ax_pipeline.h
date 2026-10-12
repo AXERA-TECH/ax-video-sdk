@@ -89,6 +89,9 @@ struct PipelineConfig {
 
 struct PipelineStats {
     std::uint64_t decoded_frames{0};
+    // 解码后、送进 pipeline 之前就被丢掉的帧(下游太慢,回调队列满)。
+    // 离线文件输入走无损投递,这里应恒为 0;实时源下非 0 说明处理跟不上。
+    std::uint64_t decode_dropped_frames{0};
     std::uint64_t branch_submit_failures{0};
     // 最新检测结果相对当前帧滞后了几帧(见 Pipeline::SetDetectionSourceSeq)。
     // 异步推理下这个值天然 > 0;给 ROI 编码等"按位置使用检测结果"的功能做补偿依据。
