@@ -119,6 +119,9 @@ private:
     double qp_bias_{0.0};
     std::uint64_t window_bytes_{0};
     std::uint64_t window_packets_{0};
+    int saturated_windows_{0};
+    bool rate_unreachable_{false};
+    bool saturation_warned_{false};
 
     std::mutex staging_mutex_;
     std::deque<common::AxImage::Ptr> reusable_frames_;

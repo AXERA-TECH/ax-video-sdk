@@ -34,6 +34,9 @@ struct VideoEncoderStats {
     std::uint32_t measured_bitrate_kbps{0};
     // QPMAP 模式下当前使用的背景 QP;码率闭环开启时是闭环结果。未开 qpmap 时为 0。
     std::int32_t qpmap_base_qp{0};
+    // 码率闭环已经把 QP 推到 max_qp、ROI 优待也收干了,实测码率仍明显高于目标。
+    // 这时候压不下去不是参数没调对,而是这个分辨率/帧率下 QP 已经到头了。
+    bool rate_target_unreachable{false};
 };
 
 // 目标区域矩形,坐标在编码器输入图像(VideoEncoderConfig 的 width/height)坐标系下。

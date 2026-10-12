@@ -188,6 +188,9 @@ bool AxVideoEncoderBase::Open(const VideoEncoderConfig& config) {
         qp_bias_ = 0.0;
         window_bytes_ = 0;
         window_packets_ = 0;
+        saturated_windows_ = 0;
+        rate_unreachable_ = false;
+        saturation_warned_ = false;
     }
     if (!CreateBackend(config_)) {
         return false;
@@ -345,6 +348,7 @@ VideoEncoderStats AxVideoEncoderBase::GetStats() const {
     {
         std::lock_guard<std::mutex> lock(rate_mutex_);
         stats.measured_bitrate_kbps = measured_bitrate_kbps_;
+        stats.rate_target_unreachable = rate_unreachable_;
     }
     if (config_.qpmap.enable) {
         stats.qpmap_base_qp = QpMapBaseQp(false);
@@ -377,7 +381,13 @@ void AxVideoEncoderBase::SetTargetBitrateKbps(std::uint32_t kbps) {
     // 只在关闭闭环时清掉,避免固定 QP 模式被残留偏移污染。
     if (kbps == 0) {
         qp_bias_ = 0.0;
+        saturated_windows_ = 0;
+        rate_unreachable_ = false;
+        saturation_warned_ = false;
     }
+    // 注意别在这里重置饱和计数:compression_ratio 下输入码率每秒都在抖,
+    // 目标也就每秒都在微调,一重置就永远攒不满判定窗口。
+    // 饱和与否完全由 AccountPacket 按当前实测/目标比例重新判断。
 }
 
 // 码率闭环。H.264/265 下 QP 每 +6 码率大致减半,所以用 6*log2(实测/目标) 作为需要的
@@ -417,6 +427,29 @@ void AxVideoEncoderBase::AccountPacket(std::size_t bytes) {
     const double hi = static_cast<double>(config_.qpmap.max_qp - config_.qpmap.p_qp) +
                       static_cast<double>(-std::min(0, config_.qpmap.roi_qp_delta));
     qp_bias_ = std::clamp(qp_bias_ + step, lo, hi);
+
+    // 行程走到头、码率还明显超标 —— 说明这个分辨率/帧率下 QP 已经到顶,压不动了。
+    // 静默卡在 max_qp 是最糟的:现场只会看到"设了压 16 倍但没压到",无从下手。
+    constexpr double kUnreachableRatio = 1.15;
+    constexpr int kUnreachableWindows = 3;
+    if (ratio > kUnreachableRatio && qp_bias_ >= hi - 1e-6) {
+        if (++saturated_windows_ >= kUnreachableWindows) {
+            rate_unreachable_ = true;
+            if (!saturation_warned_) {
+                saturation_warned_ = true;
+                std::fprintf(stderr,
+                             "venc: target %u kbps unreachable - QP saturated at %d and still "
+                             "measuring %.0f kbps (%.2fx target). Lower the resolution or frame "
+                             "rate; QP alone cannot go further.\n",
+                             target_bitrate_kbps_, config_.qpmap.max_qp, actual_kbps, ratio);
+            }
+        }
+    } else {
+        saturated_windows_ = 0;
+        rate_unreachable_ = false;
+        // 回到达标区间后允许下次再次告警(场景变了可能又压不住)。
+        if (ratio <= 1.0) saturation_warned_ = false;
+    }
 }
 
 std::int32_t AxVideoEncoderBase::QpMapBaseQp(bool intra) const noexcept {

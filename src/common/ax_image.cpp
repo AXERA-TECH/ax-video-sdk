@@ -622,6 +622,89 @@ void AxImage::Fill(std::uint8_t value) noexcept {
 #endif
 }
 
+namespace {
+#if defined(AXSDK_PLATFORM_AXCL)
+// AXCL 的 memcpy 把 CMM 物理地址当 device 指针用(SDK 内部同款用法)。
+bool CopyChunkAxcl(std::uint64_t phy, std::uint8_t* host, std::size_t sz, bool to_host) noexcept {
+    if (phy == 0 || sz == 0) {
+        return false;
+    }
+    auto* dev = reinterpret_cast<void*>(phy);
+    const auto ret = to_host ? axclrtMemcpy(host, dev, sz, AXCL_MEMCPY_DEVICE_TO_HOST)
+                             : axclrtMemcpy(dev, host, sz, AXCL_MEMCPY_HOST_TO_DEVICE);
+    return ret == 0;
+}
+#endif
+
+// host <-> 图像的拷贝。AXCL 下 CMM/pool 是设备内存,只能走 axclrtMemcpy;
+// 板端 CMM 有 CPU 映射,直接 memcpy 加 cache 操作。
+bool CopyPlanesHost(AxImage& image, void* host, std::size_t host_size, bool to_host) noexcept {
+    const auto total = image.byte_size();
+    if (host == nullptr || host_size < total || total == 0) {
+        return false;
+    }
+
+    // 各 plane 的 size 之和应当等于 byte_size。packed 格式(RGB/BGR)下 plane 信息可能
+    // 不完整(plane_size 为 0),那就按整块搬 —— 底层本来就是一整块连续内存。
+    // 不做这个退化的后果踩过:循环被整个跳过,函数返回成功但缓冲全是 0。
+    std::size_t summed = 0;
+    for (std::size_t i = 0; i < image.plane_count(); ++i) {
+        summed += image.plane_size(i);
+    }
+    const bool whole = summed != total;
+    auto* p = static_cast<std::uint8_t*>(host);
+
+#if defined(AXSDK_PLATFORM_AXCL)
+    if (!internal::EnsureAxclThreadContext()) {
+        return false;
+    }
+    if (whole) {
+        return CopyChunkAxcl(image.physical_address(0), p, total, to_host);
+    }
+    for (std::size_t i = 0; i < image.plane_count(); ++i) {
+        const auto sz = image.plane_size(i);
+        if (sz == 0) continue;
+        if (!CopyChunkAxcl(image.physical_address(i), p, sz, to_host)) {
+            return false;
+        }
+        p += sz;
+    }
+    return true;
+#else
+    if (to_host) {
+        (void)image.InvalidateCache();
+    }
+    const std::size_t planes = whole ? 1U : image.plane_count();
+    for (std::size_t i = 0; i < planes; ++i) {
+        const auto sz = whole ? total : image.plane_size(i);
+        if (sz == 0) continue;
+        if (to_host) {
+            const auto* src = image.plane_data(i);
+            if (src == nullptr) return false;
+            std::memcpy(p, src, sz);
+        } else {
+            auto* dst = image.mutable_plane_data(i);
+            if (dst == nullptr) return false;
+            std::memcpy(dst, p, sz);
+        }
+        p += sz;
+    }
+    if (!to_host) {
+        (void)image.FlushCache();
+    }
+    return true;
+#endif
+}
+}  // namespace
+
+bool AxImage::CopyToHost(void* dst, std::size_t dst_size) const noexcept {
+    return CopyPlanesHost(const_cast<AxImage&>(*this), dst, dst_size, /*to_host=*/true);
+}
+
+bool AxImage::CopyFromHost(const void* src, std::size_t src_size) noexcept {
+    return CopyPlanesHost(*this, const_cast<void*>(src), src_size, /*to_host=*/false);
+}
+
 bool AxImage::FlushCache() noexcept {
 #if defined(AXSDK_PLATFORM_AXCL)
     if (!internal::EnsureAxclThreadContext()) {

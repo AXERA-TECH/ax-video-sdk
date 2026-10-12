@@ -130,6 +130,14 @@ public:
     std::uint8_t* mutable_plane_data(std::size_t plane_index) noexcept;
     const std::uint8_t* plane_data(std::size_t plane_index) const noexcept;
     void Fill(std::uint8_t value) noexcept;
+
+    // 把各 plane 紧密拷到 host 缓冲(dst_size 至少要有 byte_size() 那么大)。
+    // AXCL 下设备侧图像**不能**被 CPU 直接读,plane_data() 拿到的地址解引用会段错误;
+    // 要在 host 侧处理像素就用这个(内部走 PCIe memcpy)。板端是 cache invalidate + memcpy。
+    bool CopyToHost(void* dst, std::size_t dst_size) const noexcept;
+    // 反方向:host 缓冲 → 图像各 plane,写完会 flush,可直接送硬件。
+    bool CopyFromHost(const void* src, std::size_t src_size) noexcept;
+
     // CPU 写 cached 内存后，送入硬件前调用。
     bool FlushCache() noexcept;
     // 硬件写 cached 内存后，CPU 读取前调用。

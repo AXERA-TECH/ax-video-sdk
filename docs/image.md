@@ -80,9 +80,24 @@ auto img = AxImage::WrapExternal(d, planes, holder);
 
 注意:
 
-- AXCL 设备侧图像的 `virtual_address()` 不一定能被 host 直接访问。
-  - 若需要 host 读写，应显式拷贝到 host 可访问内存(具体通过上层模块或 copy 逻辑完成)。
+- **AXCL 设备侧图像的 `virtual_address()` / `plane_data()` 不能被 host 直接解引用**(会段错误)。
+  要在 host 侧读写像素,用下面的 `CopyToHost()` / `CopyFromHost()`。
 - cached 内存需要配合:
   - CPU 写完后送硬件: `FlushCache()`
   - 硬件写完后 CPU 读: `InvalidateCache()`
+
+## host 侧读写像素
+
+```cpp
+std::vector<std::uint8_t> host(image.byte_size());
+if (image.CopyToHost(host.data(), host.size())) {
+    // host 里是各 plane 紧密排列(按 plane_size() 顺序),可以直接交给 OpenCV / numpy
+}
+// 反方向:填好 host 缓冲后写回,内部会 flush,可直接送硬件
+image.CopyFromHost(host.data(), host.size());
+```
+
+缓冲至少要有 `byte_size()` 那么大。AXCL 下走 PCIe memcpy(1080p NV12 单帧约 3 MB),
+板端是 cache invalidate + memcpy。两个方向都不做格式转换 —— 要换格式/尺寸用
+`ImageProcessor`(走 IVPS 硬件),不要在 host 侧自己算。
 

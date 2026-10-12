@@ -31,21 +31,25 @@ bool ReadFile(const std::string& path, std::vector<std::uint8_t>* bytes) {
 }
 
 std::uint64_t ImageChecksum(common::AxImage& image) {
-    if (!image.InvalidateCache()) {
+    // 必须经 CopyToHost:AXCL 下解码出的帧在设备侧,plane_data() 的地址 CPU 解引用会段错误。
+    std::vector<std::uint8_t> host(image.byte_size());
+    if (host.empty() || !image.CopyToHost(host.data(), host.size())) {
+        std::cerr << "ImageChecksum: CopyToHost failed (bytes=" << image.byte_size()
+                  << " planes=" << image.plane_count() << " plane0=" << image.plane_size(0)
+                  << " phy0=0x" << std::hex << image.physical_address(0) << std::dec
+                  << " mem=" << static_cast<int>(image.memory_type()) << ")\n";
         return 0;
     }
 
     std::uint64_t sum = 0;
+    const std::uint8_t* p = host.data();
     for (std::size_t plane = 0; plane < image.plane_count(); ++plane) {
-        const auto* data = image.plane_data(plane);
-        if (data == nullptr) {
-            return 0;
-        }
-
-        const auto bytes = std::min<std::size_t>(image.plane_size(plane), 4096U);
+        const auto size = image.plane_size(plane);
+        const auto bytes = std::min<std::size_t>(size, 4096U);
         for (std::size_t i = 0; i < bytes; ++i) {
-            sum += data[i];
+            sum += p[i];
         }
+        p += size;
     }
 
     return sum;

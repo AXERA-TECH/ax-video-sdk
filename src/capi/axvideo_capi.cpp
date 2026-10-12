@@ -96,41 +96,21 @@ axv_frame_t* WrapFrame(AxImage::Ptr img) {
     return new axv_frame{std::move(img)};
 }
 
-// host <-> device 逐 plane 拷贝。
-// AXCL:CMM/pool 是设备内存,必须走 axclrtMemcpy;板端:CMM 有 CPU 映射,直接 memcpy。
+// host <-> device 逐 plane 拷贝。实现在 AxImage::CopyToHost/CopyFromHost 里
+// (AXCL 走 axclrtMemcpy,板端 memcpy + cache 操作),这里只负责补错误信息。
 bool CopyPlanes(const AxImage& img, void* host, size_t host_size, bool to_host) {
-    size_t total = img.byte_size();
+    const size_t total = img.byte_size();
     if (host_size < total) {
         SetError("host buffer too small: need " + std::to_string(total));
         return false;
     }
     if (!EnsureThreadContext()) return false;
-    auto* p = static_cast<uint8_t*>(host);
-    for (size_t i = 0; i < img.plane_count(); ++i) {
-        const size_t sz = img.plane_size(i);
-#if defined(AXSDK_PLATFORM_AXCL)
-        // AXCL 的 memcpy 以 CMM 物理地址作为 device 指针(SDK 内部同款用法)
-        void* dev = reinterpret_cast<void*>(img.physical_address(i));
-        const auto ret = to_host ? axclrtMemcpy(p, dev, sz, AXCL_MEMCPY_DEVICE_TO_HOST)
-                                 : axclrtMemcpy(dev, p, sz, AXCL_MEMCPY_HOST_TO_DEVICE);
-        if (ret != 0) {
-            char ec[32];
-            std::snprintf(ec, sizeof(ec), "0x%x", static_cast<unsigned>(ret));
-            SetError(std::string("axclrtMemcpy failed: ") + ec);
-            return false;
-        }
-#else
-        if (to_host) {
-            const_cast<AxImage&>(img).InvalidateCache();
-            std::memcpy(p, img.plane_data(i), sz);
-        } else {
-            std::memcpy(const_cast<AxImage&>(img).mutable_plane_data(i), p, sz);
-            const_cast<AxImage&>(img).FlushCache();
-        }
-#endif
-        p += sz;
+    const bool ok = to_host ? img.CopyToHost(host, host_size)
+                            : const_cast<AxImage&>(img).CopyFromHost(host, host_size);
+    if (!ok) {
+        SetError(to_host ? "copy to host failed" : "copy from host failed");
     }
-    return true;
+    return ok;
 }
 
 }  // namespace
