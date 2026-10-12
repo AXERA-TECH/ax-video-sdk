@@ -222,6 +222,7 @@ public:
             encoder_config.frame_rate = output.frame_rate > 0.0 ? output.frame_rate : input_frame_rate;
             encoder_config.bitrate_kbps = output.bitrate_kbps;
             encoder_config.gop = output.gop;
+            encoder_config.qpmap = output.qpmap;
             if (output.input_queue_depth > 0) {
                 encoder_config.input_queue_depth = output.input_queue_depth;
             }
@@ -543,6 +544,33 @@ public:
 
     void SetDetectionSourceSeq(std::uint64_t source_seq) override {
         det_source_seq_.store(source_seq, std::memory_order_relaxed);
+    }
+
+    void SetQpRoi(const std::vector<codec::QpRoiRect>& rois) override {
+        const auto src_w = input_stream_.width;
+        const auto src_h = input_stream_.height;
+        std::lock_guard<std::mutex> lock(branches_mutex_);
+        for (auto& branch : branches_) {
+            if (!branch.encoder || !branch.config.qpmap.enable) continue;
+            const auto dst_w = branch.config.width == 0 ? src_w : branch.config.width;
+            const auto dst_h = branch.config.height == 0 ? src_h : branch.config.height;
+            if (dst_w == src_w && dst_h == src_h) {
+                branch.encoder->SetQpRoi(rois);
+                continue;
+            }
+            // 输出被缩放过:ROI 跟着缩放到编码坐标系
+            std::vector<codec::QpRoiRect> scaled;
+            scaled.reserve(rois.size());
+            for (const auto& r : rois) {
+                codec::QpRoiRect s{};
+                s.x = static_cast<std::int32_t>(static_cast<std::int64_t>(r.x) * dst_w / src_w);
+                s.y = static_cast<std::int32_t>(static_cast<std::int64_t>(r.y) * dst_h / src_h);
+                s.width = static_cast<std::uint32_t>(static_cast<std::uint64_t>(r.width) * dst_w / src_w);
+                s.height = static_cast<std::uint32_t>(static_cast<std::uint64_t>(r.height) * dst_h / src_h);
+                scaled.push_back(s);
+            }
+            branch.encoder->SetQpRoi(scaled);
+        }
     }
 
     bool SetOsd(const common::DrawFrame& osd) override {

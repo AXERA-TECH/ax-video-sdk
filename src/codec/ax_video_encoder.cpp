@@ -101,6 +101,7 @@ ResolvedVideoEncoderConfig ResolveConfig(const VideoEncoderConfig& config) noexc
     resolved.stream_buffer_size = std::max<std::size_t>(
         static_cast<std::size_t>(config.width) * static_cast<std::size_t>(config.height), 1024U * 1024U);
     resolved.resize = config.resize;
+    resolved.qpmap = config.qpmap;
     return resolved;
 }
 
@@ -328,6 +329,16 @@ VideoEncoderStats AxVideoEncoderBase::GetStats() const {
 void AxVideoEncoderBase::SetPacketCallback(PacketCallback callback) {
     std::lock_guard<std::mutex> lock(callback_mutex_);
     packet_callback_ = std::move(callback);
+}
+
+void AxVideoEncoderBase::SetQpRoi(const std::vector<QpRoiRect>& rois) {
+    std::lock_guard<std::mutex> lock(roi_mutex_);
+    qp_rois_ = rois;
+}
+
+std::vector<QpRoiRect> AxVideoEncoderBase::qp_rois() const {
+    std::lock_guard<std::mutex> lock(roi_mutex_);
+    return qp_rois_;
 }
 
 const ResolvedVideoEncoderConfig& AxVideoEncoderBase::config() const noexcept {

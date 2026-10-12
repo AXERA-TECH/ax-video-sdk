@@ -37,6 +37,8 @@ struct PipelineOutputConfig {
     std::vector<std::string> uris;
     // 额外的 host 侧编码包回调。默认 nullptr。
     codec::PacketCallback packet_callback{};
+    // 目标区域差异化量化(码率花在目标上,背景粗编)。ROI 用 Pipeline::SetQpRoi 下发。
+    codec::QpMapOptions qpmap{};
 };
 
 struct PipelineFrameOutputConfig {
@@ -98,6 +100,10 @@ public:
     // 推理结果一到就调,**与该结果是否产生了检测框无关**——画面里暂时没目标
     // 不等于结果过期。供 PipelineStats::det_lag_frames 统计。
     virtual void SetDetectionSourceSeq(std::uint64_t source_seq) { (void)source_seq; }
+
+    // 下发 ROI 给所有已配置 qpmap 的输出分支。坐标统一用**解码原图**坐标系,
+    // pipeline 会按各分支的编码尺寸自动缩放。传空表示整帧按背景 QP。
+    virtual void SetQpRoi(const std::vector<codec::QpRoiRect>& rois) { (void)rois; }
     virtual void ClearOsd() noexcept = 0;
 
     virtual PipelineStats GetStats() const = 0;

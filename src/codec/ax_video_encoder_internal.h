@@ -27,6 +27,7 @@ struct ResolvedVideoEncoderConfig {
     QueueOverflowPolicy overflow_policy{QueueOverflowPolicy::kDropOldest};
     std::size_t stream_buffer_size{0};
     common::ResizeOptions resize{};
+    QpMapOptions qpmap{};
 };
 
 struct PreparedInputFrame {
@@ -48,6 +49,7 @@ public:
     bool GetLatestPacket(EncodedPacket* packet) override;
     VideoEncoderStats GetStats() const override;
     void SetPacketCallback(PacketCallback callback) override;
+    void SetQpRoi(const std::vector<QpRoiRect>& rois) override;
 
 protected:
     virtual bool CreateBackend(const ResolvedVideoEncoderConfig& config) = 0;
@@ -58,6 +60,8 @@ protected:
     virtual bool ReceivePacketFromEncoder(EncodedPacket* packet, bool* flow_end) = 0;
 
     const ResolvedVideoEncoderConfig& config() const noexcept;
+    // 后端在送帧时取当前 ROI 快照来构建 QPMAP。
+    std::vector<QpRoiRect> qp_rois() const;
     bool ValidateInputFrame(const common::AxImage& frame) const noexcept;
     PreparedInputFrame PrepareInputFrame(const common::AxImage& frame);
     bool stop_requested() const noexcept;
@@ -98,6 +102,9 @@ private:
 
     std::mutex callback_mutex_;
     PacketCallback packet_callback_;
+
+    mutable std::mutex roi_mutex_;
+    std::vector<QpRoiRect> qp_rois_;
 
     std::mutex staging_mutex_;
     std::deque<common::AxImage::Ptr> reusable_frames_;

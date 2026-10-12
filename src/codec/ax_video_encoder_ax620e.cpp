@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <atomic>
 #include <thread>
@@ -106,6 +107,10 @@ protected:
             channel_attr.stVencAttr.enTier = AX_VENC_HEVC_MAIN_TIER;
         }
 
+        if (config.qpmap.enable) {
+            std::fprintf(stderr,
+                         "ax620e venc: qpmap requested but not supported on this chip, falling back to CBR\n");
+        }
         ConfigureCbrRc(config, &channel_attr);
         channel_attr.stGopAttr.enGopMode = AX_VENC_GOPMODE_NORMALP;
         channel_attr.stGopAttr.stNormalP.stPicConfig.s32QpOffset = 0;

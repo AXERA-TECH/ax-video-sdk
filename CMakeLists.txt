@@ -144,6 +144,7 @@ message(STATUS "AX BSP compiled version: ${AXSDK_BSP_COMPILED_VERSION}")
 
 add_library(ax_video_sdk ${AXSDK_LIBRARY_TYPE}
     src/codec/ax_jpeg_codec.cpp
+    src/codec/ax_qpmap.cpp
     src/common/ax_drawer.cpp
     src/common/ax_image.cpp
     src/common/ax_image_copy.cpp

@@ -5,14 +5,17 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <vector>
 #include <thread>
 
 #include "axcl_rt_memory.h"
+#include "axcl_sys.h"
 #include "axcl_venc.h"
 #include "ax_venc_comm.h"
 
 #include "ax_image_internal.h"
 #include "ax_system_internal.h"
+#include "ax_qpmap.h"
 
 namespace axvsdk::codec::internal {
 
@@ -71,6 +74,36 @@ void ConfigureCbrRc(const ResolvedVideoEncoderConfig& config, AX_VENC_CHN_ATTR_T
     }
 }
 
+// ABS QPMAP:实际 QP 完全由每帧的 map 决定,关掉 CTB RC 以免目标码率把 QP 改写回去。
+void ConfigureQpMapRc(const ResolvedVideoEncoderConfig& config, AX_VENC_CHN_ATTR_T* channel_attr) {
+    auto* rc = &channel_attr->stRcAttr;
+    rc->s32FirstFrameStartQp = -1;
+    rc->stFrameRate.fSrcFrameRate = static_cast<AX_F32>(config.src_frame_rate);
+    rc->stFrameRate.fDstFrameRate = static_cast<AX_F32>(config.dst_frame_rate);
+
+    if (config.codec == VideoCodecType::kH264) {
+        rc->enRcMode = AX_VENC_RC_MODE_H264QPMAP;
+        auto* qpmap = &rc->stH264QpMap;
+        qpmap->u32Gop = config.gop;
+        qpmap->u32StatTime = 1;
+        qpmap->u32TargetBitRate = config.bitrate_kbps;
+        qpmap->stQpmapInfo.enCtbRcMode = AX_VENC_RC_CTBRC_DISABLE;
+        qpmap->stQpmapInfo.enQpmapQpType = AX_VENC_QPMAP_QP_ABS;
+        qpmap->stQpmapInfo.enQpmapBlockType = AX_VENC_QPMAP_BLOCK_DISABLE;
+        qpmap->stQpmapInfo.enQpmapBlockUnit = AX_VENC_QPMAP_BLOCK_UNIT_16x16;
+    } else {
+        rc->enRcMode = AX_VENC_RC_MODE_H265QPMAP;
+        auto* qpmap = &rc->stH265QpMap;
+        qpmap->u32Gop = config.gop;
+        qpmap->u32StatTime = 1;
+        qpmap->u32TargetBitRate = config.bitrate_kbps;
+        qpmap->stQpmapInfo.enCtbRcMode = AX_VENC_RC_CTBRC_DISABLE;
+        qpmap->stQpmapInfo.enQpmapQpType = AX_VENC_QPMAP_QP_ABS;
+        qpmap->stQpmapInfo.enQpmapBlockType = AX_VENC_QPMAP_BLOCK_DISABLE;
+        qpmap->stQpmapInfo.enQpmapBlockUnit = AX_VENC_QPMAP_BLOCK_UNIT_16x16;
+    }
+}
+
 class AxclVideoEncoder final : public AxVideoEncoderBase {
 public:
     ~AxclVideoEncoder() override {
@@ -109,7 +142,11 @@ protected:
             channel_attr.stVencAttr.enTier = AX_VENC_HEVC_MAIN_TIER;
         }
 
-        ConfigureCbrRc(config, &channel_attr);
+        if (config.qpmap.enable) {
+            ConfigureQpMapRc(config, &channel_attr);
+        } else {
+            ConfigureCbrRc(config, &channel_attr);
+        }
         channel_attr.stGopAttr.enGopMode = AX_VENC_GOPMODE_NORMALP;
         channel_attr.stGopAttr.stNormalP.stPicConfig.s32QpOffset = 0;
         channel_attr.stGopAttr.stNormalP.stPicConfig.f32QpFactor = 0.4624F;
@@ -119,7 +156,91 @@ protected:
             return false;
         }
 
+        if (config.qpmap.enable && !AllocQpMaps(config)) {
+            (void)AXCL_VENC_DestroyChn(channel_);
+            channel_ = -1;
+            return false;
+        }
+
         return true;
+    }
+
+    // QPMAP buffer ring:buffer 从 SendFrameEx 到硬件消费完都必须有效,
+    // 深度与 VENC 输入 FIFO 对齐。AXCL 下 VENC 在卡上,map 必须落在设备 CMM;
+    // host 侧另备 staging 缓冲用于逐帧组装,再 DMA 上卡。
+    bool AllocQpMaps(const ResolvedVideoEncoderConfig& config) {
+        qpmap_layout_ = MakeQpMapLayout(config.codec, config.width, config.height);
+        if (!qpmap_layout_.valid()) return false;
+        for (std::size_t i = 0; i < kQpMapRing; ++i) {
+            AX_U64 phy = 0;
+            AX_VOID* vir = nullptr;
+            if (AXCL_SYS_MemAlloc(&phy, &vir, static_cast<AX_U32>(qpmap_layout_.size), 64,
+                                  reinterpret_cast<const AX_S8*>("VencQpMap")) != AX_SUCCESS) {
+                FreeQpMaps();
+                return false;
+            }
+            qpmap_phy_[i] = phy;
+            qpmap_dev_vir_[i] = vir;
+        }
+        qpmap_host_.assign(qpmap_layout_.size, 0);
+        return true;
+    }
+
+    void FreeQpMaps() noexcept {
+        for (std::size_t i = 0; i < kQpMapRing; ++i) {
+            if (qpmap_phy_[i] != 0) {
+                (void)AXCL_SYS_MemFree(qpmap_phy_[i], qpmap_dev_vir_[i]);
+                qpmap_phy_[i] = 0;
+                qpmap_dev_vir_[i] = nullptr;
+            }
+        }
+        qpmap_host_.clear();
+        qpmap_layout_ = {};
+        qpmap_index_ = 0;
+    }
+
+    // 按当前 ROI 建图并挂在帧上提交。I 帧整帧 i_qp;P/B 背景 p_qp、ROI 处加 delta。
+    bool SendFrameWithQpMap(const AX_VIDEO_FRAME_INFO_T& frame_info) {
+        if (qpmap_host_.empty()) return false;
+        const auto slot = qpmap_index_ % kQpMapRing;
+        auto* map = qpmap_host_.data();
+
+        const auto& cfg = config();
+        const auto gop = cfg.gop == 0 ? 30U : cfg.gop;
+        const bool intra = (qpmap_index_ % gop) == 0;
+        const std::int32_t base_qp = intra ? cfg.qpmap.i_qp : cfg.qpmap.p_qp;
+        FillQpMap(map, qpmap_layout_, base_qp);
+        if (!intra) {
+            ApplyQpMapRois(map, qpmap_layout_, qp_rois(), base_qp + cfg.qpmap.roi_qp_delta,
+                           cfg.width, cfg.height);
+        }
+        if (axclrtMemcpy(reinterpret_cast<void*>(qpmap_phy_[slot]), map, qpmap_layout_.size,
+                         AXCL_MEMCPY_HOST_TO_DEVICE) != AXCL_SUCC) {
+            return false;
+        }
+
+        AX_USER_FRAME_INFO_T user_frame{};
+        user_frame.stUserFrame = frame_info;
+        user_frame.stUserRcInfo.bQpMapValid = AX_TRUE;
+        user_frame.stUserRcInfo.bIPCMMapValid = AX_FALSE;
+        user_frame.stUserRcInfo.u32BlkStartQp = static_cast<AX_U32>(base_qp);
+        user_frame.stUserRcInfo.u64QpMapPhyAddr = qpmap_phy_[slot];
+        user_frame.stUserRcInfo.pQpMapVirAddr = reinterpret_cast<AX_S8*>(qpmap_dev_vir_[slot]);
+        user_frame.stUserRcInfo.enFrameType = AX_FRAME_TYPE_AUTO;
+        user_frame.stUserRcInfo.u32RoiMapDeltaSize = static_cast<AX_U32>(qpmap_layout_.size);
+
+        while (!stop_requested()) {
+            const auto ret = AXCL_VENC_SendFrameEx(channel_, &user_frame, kAxSendWaitMs);
+            if (ret == AX_SUCCESS) {
+                ++qpmap_index_;
+                return true;
+            }
+            if (ret != AX_ERR_VENC_QUEUE_FULL && ret != AX_ERR_VENC_BUF_FULL) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return false;
     }
 
     void DestroyBackend() noexcept override {
@@ -177,6 +298,9 @@ protected:
         }
 
         const auto& frame_info = common::internal::AxImageAccess::GetAxFrameInfo(frame);
+        if (config().qpmap.enable) {
+            return SendFrameWithQpMap(frame_info);
+        }
         while (!stop_requested()) {
             const auto ret = AXCL_VENC_SendFrame(channel_, &frame_info, kAxSendWaitMs);
             if (ret == AX_SUCCESS) {
@@ -224,8 +348,16 @@ protected:
     }
 
 private:
+    static constexpr std::size_t kQpMapRing = 4;  // 与 u8InFifoDepth 对齐
+
     VENC_CHN channel_{-1};
     bool started_{false};
+
+    QpMapLayout qpmap_layout_{};
+    AX_U64 qpmap_phy_[kQpMapRing]{};
+    AX_VOID* qpmap_dev_vir_[kQpMapRing]{};
+    std::vector<std::int8_t> qpmap_host_;  // host 组装区,再 DMA 到设备
+    std::uint64_t qpmap_index_{0};
 };
 
 }  // namespace

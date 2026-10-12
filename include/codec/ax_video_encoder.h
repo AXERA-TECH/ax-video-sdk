@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <vector>
 #include <string>
 
 #include "codec/ax_codec_types.h"
@@ -31,6 +32,27 @@ struct VideoEncoderStats {
     std::size_t queue_capacity{0};
 };
 
+// 目标区域矩形,坐标在编码器输入图像(VideoEncoderConfig 的 width/height)坐标系下。
+struct QpRoiRect {
+    std::int32_t x{0};
+    std::int32_t y{0};
+    std::uint32_t width{0};
+    std::uint32_t height{0};
+};
+
+// 目标区域差异化量化(VENC ABS QPMAP):把码率花在关心的目标上,背景粗编。
+// 开启后码控切到 QPMAP 模式,逐 16x16 单元指定绝对 QP:
+//   I 帧        -> i_qp
+//   P/B 背景    -> p_qp
+//   P/B ROI 区  -> clamp(p_qp + roi_qp_delta, 0, 51)
+// QP 越小越清晰,所以 roi_qp_delta 取负值。ROI 由 VideoEncoder::SetQpRoi 随时更新。
+struct QpMapOptions {
+    bool enable{false};
+    std::int32_t i_qp{38};
+    std::int32_t p_qp{40};
+    std::int32_t roi_qp_delta{-4};
+};
+
 struct VideoEncoderConfig {
     VideoCodecType codec{VideoCodecType::kUnknown};
     std::uint32_t width{0};
@@ -49,6 +71,8 @@ struct VideoEncoderConfig {
     // 当输入图像与编码器目标尺寸不一致时，内部使用该 resize 策略做预处理。
     // 编码器硬件侧最终输入统一为 NV12。
     common::ResizeOptions resize{};
+    // 目标区域差异化量化。enable=false 时维持原有 CBR 行为。
+    QpMapOptions qpmap{};
 };
 
 using PacketCallback = std::function<void(EncodedPacket packet)>;
@@ -73,6 +97,12 @@ public:
     // 注册码流输出回调。
     // 回调拿到的是 host 侧编码包数据，可直接用于写文件、推流或自定义处理。
     virtual void SetPacketCallback(PacketCallback callback) = 0;
+
+    // 设置后续帧的 ROI(编码输入坐标系),线程安全,可随时替换;传空表示整帧按背景 QP。
+    // 仅在 config.qpmap.enable 时生效。
+    // 注意:上层若用异步检测的框填这里,框相对正在编码的帧天然滞后
+    // (见 PipelineStats::det_lag_frames),应按滞后量外扩后再传入。
+    virtual void SetQpRoi(const std::vector<QpRoiRect>& rois) { (void)rois; }
 };
 
 std::unique_ptr<VideoEncoder> CreateVideoEncoder();
