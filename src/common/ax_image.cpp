@@ -190,6 +190,7 @@ struct AxImage::Impl {
     std::array<void*, kMaxImagePlanes> virtual_addresses{};
     std::array<std::uint32_t, kMaxImagePlanes> block_ids{};
     AX_VIDEO_FRAME_INFO_T frame_info{};
+    std::uint64_t frame_seq{0};
     internal::AxImageAccess::FrameReleaseCallback release_callback;
     std::shared_ptr<void> lifetime_holder;
 
@@ -560,6 +561,18 @@ MemoryType AxImage::memory_type() const noexcept {
 
 CacheMode AxImage::cache_mode() const noexcept {
     return impl_->cache_mode;
+}
+
+std::uint64_t AxImage::pts() const noexcept {
+    return impl_ ? impl_->frame_info.stVFrame.u64PTS : 0;
+}
+
+std::uint64_t AxImage::seq() const noexcept {
+    return impl_ ? impl_->frame_seq : 0;
+}
+
+void AxImage::set_seq(std::uint64_t seq) noexcept {
+    if (impl_) impl_->frame_seq = seq;
 }
 
 std::uint64_t AxImage::physical_address(std::size_t plane_index) const noexcept {

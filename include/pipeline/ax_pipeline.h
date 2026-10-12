@@ -60,6 +60,10 @@ struct PipelineConfig {
 struct PipelineStats {
     std::uint64_t decoded_frames{0};
     std::uint64_t branch_submit_failures{0};
+    // 最新检测结果相对当前帧滞后了几帧(见 Pipeline::SetDetectionSourceSeq)。
+    // 异步推理下这个值天然 > 0;给 ROI 编码等"按位置使用检测结果"的功能做补偿依据。
+    std::uint64_t det_lag_frames{0};
+    std::uint64_t det_lag_frames_max{0};
     std::vector<codec::VideoEncoderStats> output_stats;
 };
 
@@ -90,6 +94,10 @@ public:
     // 设置异步 OSD。
     // 当前 AXCL 后端仅支持 rect；其余平台能力以各自实现为准。
     virtual bool SetOsd(const common::DrawFrame& osd) = 0;
+    // 记录"最新一次检测结果基于哪个解码帧(AxImage::seq)算出"。
+    // 推理结果一到就调,**与该结果是否产生了检测框无关**——画面里暂时没目标
+    // 不等于结果过期。供 PipelineStats::det_lag_frames 统计。
+    virtual void SetDetectionSourceSeq(std::uint64_t source_seq) { (void)source_seq; }
     virtual void ClearOsd() noexcept = 0;
 
     virtual PipelineStats GetStats() const = 0;

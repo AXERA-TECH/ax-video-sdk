@@ -318,6 +318,10 @@ public:
         }
         drawer_ = common::internal::CreatePlatformDrawer();
         decoded_frames_.store(0, std::memory_order_relaxed);
+        frame_seq_.store(0, std::memory_order_relaxed);
+        det_source_seq_.store(0, std::memory_order_relaxed);
+        det_lag_frames_.store(0, std::memory_order_relaxed);
+        det_lag_frames_max_.store(0, std::memory_order_relaxed);
         branch_submit_failures_.store(0, std::memory_order_relaxed);
         demux_stop_ = false;
         open_ = true;
@@ -537,6 +541,10 @@ public:
         }
     }
 
+    void SetDetectionSourceSeq(std::uint64_t source_seq) override {
+        det_source_seq_.store(source_seq, std::memory_order_relaxed);
+    }
+
     bool SetOsd(const common::DrawFrame& osd) override {
         if (!open_ || !drawer_) {
             return false;
@@ -570,6 +578,8 @@ public:
         PipelineStats stats{};
         stats.decoded_frames = decoded_frames_.load(std::memory_order_relaxed);
         stats.branch_submit_failures = branch_submit_failures_.load(std::memory_order_relaxed);
+        stats.det_lag_frames = det_lag_frames_.load(std::memory_order_relaxed);
+        stats.det_lag_frames_max = det_lag_frames_max_.load(std::memory_order_relaxed);
         {
             std::lock_guard<std::mutex> lock(branches_mutex_);
             stats.output_stats.reserve(branches_.size());
@@ -1028,6 +1038,24 @@ private:
             return;
         }
 
+        // 给每个解码帧盖单调序号:消费者(NPU 侧异步推理、编码侧 OSD/QPMAP)凭它配对,
+        // 知道手上的检测结果是基于哪一帧算出来的。
+        const auto frame_seq = frame_seq_.fetch_add(1, std::memory_order_relaxed) + 1;
+        frame->set_seq(frame_seq);
+
+        // 检测结果滞后 = 当前帧号 - 这组结果所基于的帧号。异步推理下天然 > 0,
+        // 是 ROI 编码等"按位置使用检测框"的功能做补偿的依据。
+        // 必须在 branches_ 为空的提前返回之前算:仅解码+AI 模式同样需要这个指标。
+        const auto det_seq = det_source_seq_.load(std::memory_order_relaxed);
+        if (det_seq != 0 && frame_seq >= det_seq) {
+            const auto lag = frame_seq - det_seq;
+            det_lag_frames_.store(lag, std::memory_order_relaxed);
+            auto prev_max = det_lag_frames_max_.load(std::memory_order_relaxed);
+            while (lag > prev_max &&
+                   !det_lag_frames_max_.compare_exchange_weak(prev_max, lag, std::memory_order_relaxed)) {
+            }
+        }
+
         // Publish the raw decoded frame to callback/GetLatestFrame first. OSD is applied only on
         // the encoder path to avoid mutating frames consumed by the user/NPU thread.
         common::AxImage::Ptr source_frame = frame;
@@ -1060,6 +1088,7 @@ private:
             request.output_image = encoder_frame->descriptor();
             auto copied = CreateFrameCopy(*encoder_frame, request);
             if (copied) {
+                copied->set_seq(frame_seq);
                 encoder_frame = std::move(copied);
             } else {
                 std::fprintf(stderr, "pipeline: copy decoded frame to CMM failed\n");
@@ -1090,6 +1119,12 @@ private:
     std::atomic<bool> demux_stop_{false};
     std::atomic<bool> callback_stop_{false};
     std::atomic<std::uint64_t> decoded_frames_{0};
+    // 帧-检测配对:每个解码帧盖一个单调号;OSD 带上它来源帧的号,
+    // 二者之差就是"这组框相对当前画面过期了几帧"。
+    std::atomic<std::uint64_t> frame_seq_{0};
+    std::atomic<std::uint64_t> det_source_seq_{0};
+    std::atomic<std::uint64_t> det_lag_frames_{0};
+    std::atomic<std::uint64_t> det_lag_frames_max_{0};
     std::atomic<std::uint64_t> branch_submit_failures_{0};
 
     mutable std::mutex frame_mutex_;

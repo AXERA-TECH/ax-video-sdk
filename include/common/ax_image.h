@@ -113,6 +113,12 @@ public:
     MemoryType memory_type() const noexcept;
     CacheMode cache_mode() const noexcept;
 
+    // 帧标识。pts 来自码流(硬件透传);seq 是 pipeline 为每个解码帧盖的单调序号,
+    // 用于把"异步算出的检测结果"和"当前正在编码的帧"配对,进而算出结果过期了几帧。
+    std::uint64_t pts() const noexcept;
+    std::uint64_t seq() const noexcept;
+    void set_seq(std::uint64_t seq) noexcept;
+
     std::uint64_t physical_address(std::size_t plane_index) const noexcept;
     void* virtual_address(std::size_t plane_index) noexcept;
     const void* virtual_address(std::size_t plane_index) const noexcept;
