@@ -30,6 +30,10 @@ struct VideoEncoderStats {
     std::uint64_t key_packets{0};
     std::size_t current_queue_depth{0};
     std::size_t queue_capacity{0};
+    // 最近一个统计窗口(1 秒)的实际输出码率。
+    std::uint32_t measured_bitrate_kbps{0};
+    // QPMAP 模式下当前使用的背景 QP;码率闭环开启时是闭环结果。未开 qpmap 时为 0。
+    std::int32_t qpmap_base_qp{0};
 };
 
 // 目标区域矩形,坐标在编码器输入图像(VideoEncoderConfig 的 width/height)坐标系下。
@@ -51,6 +55,14 @@ struct QpMapOptions {
     std::int32_t i_qp{38};
     std::int32_t p_qp{40};
     std::int32_t roi_qp_delta{-4};
+    // 码率闭环。非 0 时不再用固定的 i_qp/p_qp,而是按实测输出码率自动调整背景 QP
+    // 去逼近这个目标(kbps);i_qp/p_qp 退化为闭环起点,两者的差值保持不变。
+    // ROI 区始终按 roi_qp_delta 相对背景加细,所以"目标清晰、背景够用"的结构不变。
+    // 也可以运行时用 VideoEncoder::SetTargetBitrateKbps 改。
+    std::uint32_t target_bitrate_kbps{0};
+    // 闭环允许的背景 QP 范围。下界防止码率目标过宽时白花码率,上界兜住画质底线。
+    std::int32_t min_qp{24};
+    std::int32_t max_qp{46};
 };
 
 struct VideoEncoderConfig {
@@ -103,6 +115,10 @@ public:
     // 注意:上层若用异步检测的框填这里,框相对正在编码的帧天然滞后
     // (见 PipelineStats::det_lag_frames),应按滞后量外扩后再传入。
     virtual void SetQpRoi(const std::vector<QpRoiRect>& rois) { (void)rois; }
+
+    // 运行时改码率闭环的目标(kbps),0 = 关闭闭环回到固定 QP。仅在 qpmap.enable 时生效。
+    // 给"按输入码流压 N 倍"这类上层策略用:输入码率是跑起来才知道的。
+    virtual void SetTargetBitrateKbps(std::uint32_t kbps) { (void)kbps; }
 };
 
 std::unique_ptr<VideoEncoder> CreateVideoEncoder();

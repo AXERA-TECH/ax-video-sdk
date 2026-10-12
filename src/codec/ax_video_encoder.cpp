@@ -1,6 +1,7 @@
 #include "ax_video_encoder_internal.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <chrono>
 #include <cstdlib>
@@ -102,6 +103,16 @@ ResolvedVideoEncoderConfig ResolveConfig(const VideoEncoderConfig& config) noexc
         static_cast<std::size_t>(config.width) * static_cast<std::size_t>(config.height), 1024U * 1024U);
     resolved.resize = config.resize;
     resolved.qpmap = config.qpmap;
+    // 闭环目标同时作为硬件侧码控目标:QPMAP ABS 下硬件不用它做决策,
+    // 但 ax620e 这类回退到 CBR 的平台靠它拿到正确的码率。
+    if (resolved.qpmap.enable && resolved.qpmap.target_bitrate_kbps > 0) {
+        resolved.bitrate_kbps = resolved.qpmap.target_bitrate_kbps;
+    }
+    if (resolved.qpmap.min_qp > resolved.qpmap.max_qp) {
+        std::swap(resolved.qpmap.min_qp, resolved.qpmap.max_qp);
+    }
+    resolved.qpmap.min_qp = std::clamp(resolved.qpmap.min_qp, 0, 51);
+    resolved.qpmap.max_qp = std::clamp(resolved.qpmap.max_qp, 0, 51);
     return resolved;
 }
 
@@ -170,6 +181,14 @@ bool AxVideoEncoderBase::Open(const VideoEncoderConfig& config) {
     }
 
     config_ = ResolveConfig(config);
+    {
+        std::lock_guard<std::mutex> lock(rate_mutex_);
+        target_bitrate_kbps_ = config_.qpmap.target_bitrate_kbps;
+        measured_bitrate_kbps_ = 0;
+        qp_bias_ = 0.0;
+        window_bytes_ = 0;
+        window_packets_ = 0;
+    }
     if (!CreateBackend(config_)) {
         return false;
     }
@@ -323,6 +342,13 @@ VideoEncoderStats AxVideoEncoderBase::GetStats() const {
         std::lock_guard<std::mutex> lock(input_mutex_);
         stats.current_queue_depth = pending_frames_.size();
     }
+    {
+        std::lock_guard<std::mutex> lock(rate_mutex_);
+        stats.measured_bitrate_kbps = measured_bitrate_kbps_;
+    }
+    if (config_.qpmap.enable) {
+        stats.qpmap_base_qp = QpMapBaseQp(false);
+    }
     return stats;
 }
 
@@ -339,6 +365,93 @@ void AxVideoEncoderBase::SetQpRoi(const std::vector<QpRoiRect>& rois) {
 std::vector<QpRoiRect> AxVideoEncoderBase::qp_rois() const {
     std::lock_guard<std::mutex> lock(roi_mutex_);
     return qp_rois_;
+}
+
+void AxVideoEncoderBase::SetTargetBitrateKbps(std::uint32_t kbps) {
+    std::lock_guard<std::mutex> lock(rate_mutex_);
+    if (target_bitrate_kbps_ == kbps) {
+        return;
+    }
+    target_bitrate_kbps_ = kbps;
+    // 目标换了,之前积累的偏移对新目标没有意义,但保留它比从 0 重来收敛更快:
+    // 只在关闭闭环时清掉,避免固定 QP 模式被残留偏移污染。
+    if (kbps == 0) {
+        qp_bias_ = 0.0;
+    }
+}
+
+// 码率闭环。H.264/265 下 QP 每 +6 码率大致减半,所以用 6*log2(实测/目标) 作为需要的
+// QP 增量,再限幅加阻尼:一个窗口只有 1 秒码流,样本噪声大,走快了画质抖动肉眼可见。
+//
+// 码率按**帧数**算而不是墙上时钟:离线转码时解码远超实时,按墙钟算出来的是
+// "这台机器每秒产出多少码流",不是码流本身的码率。按帧算两种场景下结果一致。
+void AxVideoEncoderBase::AccountPacket(std::size_t bytes) {
+    constexpr double kMaxStepPerWindow = 2.0;
+    constexpr double kDamping = 0.6;
+
+    std::lock_guard<std::mutex> lock(rate_mutex_);
+    const double fps = config_.dst_frame_rate > 0.0 ? config_.dst_frame_rate : 30.0;
+    const auto window_packets = static_cast<std::uint64_t>(std::max(1.0, std::ceil(fps)));
+    window_bytes_ += bytes;
+    if (++window_packets_ < window_packets) {
+        return;
+    }
+
+    const double seconds = static_cast<double>(window_packets_) / fps;
+    const double actual_kbps = static_cast<double>(window_bytes_) * 8.0 / 1000.0 / seconds;
+    measured_bitrate_kbps_ = static_cast<std::uint32_t>(actual_kbps + 0.5);
+    window_bytes_ = 0;
+    window_packets_ = 0;
+
+    if (!config_.qpmap.enable || target_bitrate_kbps_ == 0 || actual_kbps <= 0.0) {
+        return;
+    }
+
+    const double ratio = actual_kbps / static_cast<double>(target_bitrate_kbps_);
+    const double want = 6.0 * std::log2(ratio);
+    const double step = std::clamp(want, -kMaxStepPerWindow, kMaxStepPerWindow) * kDamping;
+    // 偏移本身就要钳住,否则会在界外越积越多、等到该回头时迟迟不动(积分饱和)。
+    // 上界留出 |roi_qp_delta| 的余量:背景顶到 max_qp 之后,多出来的压力用来
+    // 收窄 ROI 的优待(见 QpMapRoiQp),不然闭环在那之后就彻底失控了。
+    const double lo = static_cast<double>(config_.qpmap.min_qp - config_.qpmap.p_qp);
+    const double hi = static_cast<double>(config_.qpmap.max_qp - config_.qpmap.p_qp) +
+                      static_cast<double>(-std::min(0, config_.qpmap.roi_qp_delta));
+    qp_bias_ = std::clamp(qp_bias_ + step, lo, hi);
+}
+
+std::int32_t AxVideoEncoderBase::QpMapBaseQp(bool intra) const noexcept {
+    const auto& qpmap = config_.qpmap;
+    const std::int32_t configured = intra ? qpmap.i_qp : qpmap.p_qp;
+    std::int32_t bias = 0;
+    {
+        std::lock_guard<std::mutex> lock(rate_mutex_);
+        if (target_bitrate_kbps_ == 0) {
+            return std::clamp(configured, 0, 51);
+        }
+        bias = static_cast<std::int32_t>(std::lround(qp_bias_));
+    }
+    // I 帧跟着背景一起浮动,保持配置里给定的 i_qp/p_qp 差值。
+    return std::clamp(configured + bias, qpmap.min_qp, qpmap.max_qp);
+}
+
+// ROI 区的 QP。通常就是背景 + roi_qp_delta,但背景顶到 max_qp 之后还压不到目标码率时,
+// 多出来的压力转而收窄这个 delta —— 码率目标优先于 ROI 优待。
+// 繁忙路口实测过不这么做的后果:背景封顶在 50,ROI(40% 面积)仍是 QP40,
+// 码率卡在目标的 1.4 倍下不来,闭环形同失效。
+std::int32_t AxVideoEncoderBase::QpMapRoiQp(std::int32_t base_qp) const noexcept {
+    const auto& qpmap = config_.qpmap;
+    std::int32_t delta = qpmap.roi_qp_delta;
+    {
+        std::lock_guard<std::mutex> lock(rate_mutex_);
+        if (target_bitrate_kbps_ != 0) {
+            const double overflow =
+                static_cast<double>(qpmap.p_qp) + qp_bias_ - static_cast<double>(qpmap.max_qp);
+            if (overflow > 0.0) {
+                delta = std::min(0, delta + static_cast<std::int32_t>(std::lround(overflow)));
+            }
+        }
+    }
+    return std::clamp(base_qp + delta, 0, 51);
 }
 
 const ResolvedVideoEncoderConfig& AxVideoEncoderBase::config() const noexcept {
@@ -690,6 +803,7 @@ void AxVideoEncoderBase::StreamLoop() {
 
         idle_polls_after_stop = 0;
         encoded_packets_.fetch_add(1, std::memory_order_relaxed);
+        AccountPacket(packet.data.size());
         if (packet.key_frame) {
             key_packets_.fetch_add(1, std::memory_order_relaxed);
         }

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <functional>
 
 namespace axvsdk::pipeline::internal {
 
@@ -23,6 +24,8 @@ bool MotionRoiDetector::Reset(std::uint32_t cols, std::uint32_t rows,
     src_height_ = src_height;
     prev_.assign(static_cast<std::size_t>(cols_) * rows_, 0);
     hold_.assign(static_cast<std::size_t>(cols_) * rows_, 0);
+    diff_.assign(static_cast<std::size_t>(cols_) * rows_, 0);
+    scratch_.reserve(static_cast<std::size_t>(cols_) * rows_);
     return true;
 }
 
@@ -33,6 +36,9 @@ void MotionRoiDetector::Clear() noexcept {
     src_height_ = 0;
     prev_.clear();
     hold_.clear();
+    diff_.clear();
+    scratch_.clear();
+    coverage_percent_ = 0;
     has_prev_ = false;
 }
 
@@ -57,6 +63,7 @@ void MotionRoiDetector::Update(const std::uint8_t* luma, std::size_t stride) {
         for (std::uint32_t c = 0; c < cols_; ++c) {
             const auto index = static_cast<std::size_t>(r) * cols_ + c;
             const int diff = std::abs(static_cast<int>(row[c]) - static_cast<int>(prev_[index]));
+            diff_[index] = static_cast<std::uint8_t>(std::min(diff, 255));
             if (diff > threshold) {
                 hold_[index] = hold_frames;
                 ++hot;
@@ -68,8 +75,53 @@ void MotionRoiDetector::Update(const std::uint8_t* luma, std::size_t stride) {
         }
     }
 
-    if (cells != 0 && static_cast<double>(hot) / static_cast<double>(cells) > kGlobalChangeRatio) {
+    if (cells == 0) return;
+
+    if (static_cast<double>(hot) / static_cast<double>(cells) > kGlobalChangeRatio) {
         std::fill(hold_.begin(), hold_.end(), 0);
+        coverage_percent_ = 0;
+        return;
+    }
+
+    // 覆盖上限:超了只留帧差最大的那些格子。直接作用在最终结果上,所以是硬上限,
+    // 不像"自动调灵敏度"那样要等几帧才收敛、还会来回震荡。
+    if (options_.max_coverage_percent > 0 && options_.max_coverage_percent < 100) {
+        const auto budget = cells * options_.max_coverage_percent / 100;
+        if (hot > budget) {
+            EnforceCoverageBudget(budget);
+            hot = budget;
+        }
+    }
+    coverage_percent_ = static_cast<std::uint32_t>(hot * 100 / cells);
+}
+
+void MotionRoiDetector::EnforceCoverageBudget(std::size_t budget) {
+    if (budget == 0) {
+        std::fill(hold_.begin(), hold_.end(), 0);
+        return;
+    }
+
+    // 活跃格子的帧差值取第 budget 大作为门槛。注意 hold 中的格子本帧可能帧差为 0
+    // (目标已经走开),它们自然排在后面先被放弃,这正是想要的优先级。
+    scratch_.clear();
+    for (std::size_t i = 0; i < hold_.size(); ++i) {
+        if (hold_[i] > 0) scratch_.push_back(diff_[i]);
+    }
+    if (scratch_.size() <= budget) return;
+
+    const auto nth = scratch_.begin() + static_cast<std::ptrdiff_t>(budget);
+    std::nth_element(scratch_.begin(), nth, scratch_.end(), std::greater<std::uint8_t>());
+    const auto cutoff = *nth;
+
+    // 门槛上可能有一堆相等的值,先砍掉严格低于门槛的,再按出现顺序补砍到预算。
+    std::size_t kept = 0;
+    for (std::size_t i = 0; i < hold_.size(); ++i) {
+        if (hold_[i] == 0) continue;
+        if (diff_[i] < cutoff || kept >= budget) {
+            hold_[i] = 0;
+        } else {
+            ++kept;
+        }
     }
 }
 

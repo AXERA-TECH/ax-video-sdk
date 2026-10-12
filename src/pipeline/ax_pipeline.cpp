@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -225,7 +227,7 @@ public:
             encoder_config.frame_rate = output.frame_rate > 0.0 ? output.frame_rate : input_frame_rate;
             encoder_config.bitrate_kbps = output.bitrate_kbps;
             encoder_config.gop = output.gop;
-            encoder_config.qpmap = output.qpmap;
+            ApplySmartEncoding(output, &encoder_config);
             if (output.input_queue_depth > 0) {
                 encoder_config.input_queue_depth = output.input_queue_depth;
             }
@@ -343,6 +345,13 @@ public:
         det_lag_frames_.store(0, std::memory_order_relaxed);
         det_lag_frames_max_.store(0, std::memory_order_relaxed);
         branch_submit_failures_.store(0, std::memory_order_relaxed);
+        motion_coverage_percent_.store(0, std::memory_order_relaxed);
+        input_bitrate_kbps_.store(0, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(input_rate_mutex_);
+            input_window_bytes_ = 0;
+            input_window_packets_ = 0;
+        }
         demux_stop_ = false;
         open_ = true;
 
@@ -657,6 +666,8 @@ public:
         stats.branch_submit_failures = branch_submit_failures_.load(std::memory_order_relaxed);
         stats.det_lag_frames = det_lag_frames_.load(std::memory_order_relaxed);
         stats.det_lag_frames_max = det_lag_frames_max_.load(std::memory_order_relaxed);
+        stats.input_bitrate_kbps = input_bitrate_kbps_.load(std::memory_order_relaxed);
+        stats.motion_coverage_percent = motion_coverage_percent_.load(std::memory_order_relaxed);
         {
             std::lock_guard<std::mutex> lock(branches_mutex_);
             stats.output_stats.reserve(branches_.size());
@@ -744,6 +755,19 @@ private:
         std::unique_ptr<Muxer> muxer;
     };
 
+    // 智能编码(QPMAP + 可选的码率闭环)下发给编码器。
+    // compression_ratio 的目标码率要等输入码率的第一个样本才算得出来,
+    // 起步这一秒先按配置里的固定 QP 走,之后由 AccountInputPacket 滚动更新。
+    static void ApplySmartEncoding(const PipelineOutputConfig& output,
+                                   codec::VideoEncoderConfig* encoder_config) {
+        encoder_config->qpmap = output.qpmap;
+        if (output.compression_ratio > 0.0 && !output.qpmap.enable) {
+            std::fprintf(stderr,
+                         "pipeline: compression_ratio=%.2f ignored, this output has no qpmap enabled\n",
+                         output.compression_ratio);
+        }
+    }
+
     bool CreateOutputBranch(const PipelineOutputConfig& output,
                             std::int32_t device_id,
                             double input_frame_rate,
@@ -772,6 +796,7 @@ private:
         encoder_config.frame_rate = output.frame_rate > 0.0 ? output.frame_rate : input_frame_rate;
         encoder_config.bitrate_kbps = output.bitrate_kbps;
         encoder_config.gop = output.gop;
+        ApplySmartEncoding(output, &encoder_config);
         if (output.input_queue_depth > 0) {
             encoder_config.input_queue_depth = output.input_queue_depth;
         }
@@ -1054,6 +1079,7 @@ private:
                              packet.key_frame ? 1 : 0);
             }
             ++packet_count;
+            AccountInputPacket(packet.data.size());
 
             if (!decoder_->SubmitPacket(std::move(packet))) {
                 std::fprintf(stderr, "pipeline demux: SubmitPacket failed\n");
@@ -1110,6 +1136,36 @@ private:
         }
     }
 
+    // 输入码流码率统计。每积满 1 秒内容结账一次,并把 compression_ratio 换算成
+    // 各分支的码率目标下发。输入码率是跑起来才知道的,所以只能在这里闭环。
+    // 按**包数**算而不是墙上时钟:离线播放时 demux 远超实时,按墙钟算出来的是
+    // "这台机器每秒读了多少码流",不是码流自己的码率。
+    void AccountInputPacket(std::size_t bytes) {
+        std::uint32_t kbps = 0;
+        {
+            std::lock_guard<std::mutex> lock(input_rate_mutex_);
+            const double fps = input_stream_.frame_rate > 0.0 ? input_stream_.frame_rate : 30.0;
+            const auto window_packets = static_cast<std::uint64_t>(std::max(1.0, std::ceil(fps)));
+            input_window_bytes_ += bytes;
+            if (++input_window_packets_ < window_packets) return;
+            const double seconds = static_cast<double>(input_window_packets_) / fps;
+            kbps = static_cast<std::uint32_t>(
+                static_cast<double>(input_window_bytes_) * 8.0 / 1000.0 / seconds + 0.5);
+            input_window_bytes_ = 0;
+            input_window_packets_ = 0;
+        }
+        input_bitrate_kbps_.store(kbps, std::memory_order_relaxed);
+        if (kbps == 0) return;
+
+        std::lock_guard<std::mutex> lock(branches_mutex_);
+        for (auto& branch : branches_) {
+            if (!branch.config.qpmap.enable || branch.config.compression_ratio <= 0.0) continue;
+            const auto target = static_cast<std::uint32_t>(
+                std::max(64.0, static_cast<double>(kbps) / branch.config.compression_ratio));
+            branch.encoder->SetTargetBitrateKbps(target);
+        }
+    }
+
     // 连续失败就关掉运动检测:静默地每帧失败是最糟的结果(功能没生效却毫无提示)。
     void NoteMotionFailure(const char* stage) {
         if (++motion_failures_ < 3) return;
@@ -1118,6 +1174,7 @@ private:
                      stage, motion_.cols(), motion_.rows());
         motion_.Clear();
         motion_frame_.reset();
+        motion_coverage_percent_.store(0, std::memory_order_relaxed);
         std::lock_guard<std::mutex> lock(roi_mutex_);
         motion_rois_.clear();
     }
@@ -1168,6 +1225,7 @@ private:
 #endif
         motion_failures_ = 0;
         motion_.Update(motion_host_.data(), stride);
+        motion_coverage_percent_.store(motion_.coverage_percent(), std::memory_order_relaxed);
         auto rects = motion_.rects();
         if (const char* dbg = std::getenv("AXVSDK_MOTION_DEBUG"); dbg != nullptr && dbg[0] == '1') {
             static std::atomic<std::uint64_t> n{0};
@@ -1301,6 +1359,13 @@ private:
     std::atomic<std::uint64_t> det_lag_frames_{0};
     std::atomic<std::uint64_t> det_lag_frames_max_{0};
     std::atomic<std::uint64_t> branch_submit_failures_{0};
+    std::atomic<std::uint32_t> motion_coverage_percent_{0};
+
+    // 输入码流码率统计,给 compression_ratio 当分母。
+    mutable std::mutex input_rate_mutex_;
+    std::uint64_t input_window_bytes_{0};
+    std::uint64_t input_window_packets_{0};
+    std::atomic<std::uint32_t> input_bitrate_kbps_{0};
 
     mutable std::mutex frame_mutex_;
     common::AxImage::Ptr latest_source_frame_;

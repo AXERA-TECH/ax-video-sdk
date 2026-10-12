@@ -32,7 +32,13 @@ public:
     // 当前处于"运动中"的区域,像素坐标,已按行合并以减少矩形数量。
     std::vector<codec::QpRoiRect> rects() const;
 
+    // 最近一次 Update 后活跃格子占画面的比例(百分比),已经过覆盖上限裁剪。
+    std::uint32_t coverage_percent() const noexcept { return coverage_percent_; }
+
 private:
+    // 活跃格子超预算时,只留帧差最大的 budget 个,其余放回背景。
+    void EnforceCoverageBudget(std::size_t budget);
+
     MotionRoiOptions options_{};
     std::uint32_t cols_{0};
     std::uint32_t rows_{0};
@@ -40,6 +46,9 @@ private:
     std::uint32_t src_height_{0};
     std::vector<std::uint8_t> prev_;
     std::vector<std::uint16_t> hold_;  // 每格剩余保持帧数
+    std::vector<std::uint8_t> diff_;   // 本次帧差,覆盖上限裁剪时用来排优先级
+    std::vector<std::uint8_t> scratch_;  // nth_element 的工作区,避免每次分配
+    std::uint32_t coverage_percent_{0};
     bool has_prev_{false};
 };
 

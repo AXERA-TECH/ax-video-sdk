@@ -39,6 +39,11 @@ struct PipelineOutputConfig {
     codec::PacketCallback packet_callback{};
     // 目标区域差异化量化(码率花在目标上,背景粗编)。ROI 用 Pipeline::SetQpRoi 下发。
     codec::QpMapOptions qpmap{};
+    // 码率目标按"相对输入码流压缩多少倍"给,例如 4.0 = 输出压到输入码率的 1/4。
+    // 比直接调 QP 好用:部署现场关心的是"能不能省下 3/4 的带宽和存储",不是 QP 取多少。
+    // 需要 qpmap.enable;非 0 时覆盖 qpmap.target_bitrate_kbps,并随实测输入码率滚动更新
+    // (RTSP 源的码率本身是变的)。
+    double compression_ratio{0.0};
 };
 
 struct PipelineFrameOutputConfig {
@@ -64,6 +69,10 @@ struct MotionRoiOptions {
     std::uint32_t hold_frames{15};
     // 每隔几帧算一次。运动区域变化慢,不必逐帧。
     std::uint32_t detect_interval{3};
+    // ROI 面积占画面的硬上限(百分比,0 = 不限)。超出时只保留帧差最大的那些格子,
+    // 其余退回背景 QP。繁忙场景下运动区域能吃掉大半画面,智能编码退化成全图高质量,
+    // 码率闭环也就压不下去了;这个上限保证"花在目标上的码率"始终有边界。
+    std::uint32_t max_coverage_percent{40};
 };
 
 struct PipelineConfig {
@@ -85,6 +94,10 @@ struct PipelineStats {
     // 异步推理下这个值天然 > 0;给 ROI 编码等"按位置使用检测结果"的功能做补偿依据。
     std::uint64_t det_lag_frames{0};
     std::uint64_t det_lag_frames_max{0};
+    // 输入码流的实测码率(kbps,1 秒窗口)。compression_ratio 的分母。
+    std::uint32_t input_bitrate_kbps{0};
+    // 运动 ROI 当前覆盖画面的比例(百分比)。未开启运动 ROI 时为 0。
+    std::uint32_t motion_coverage_percent{0};
     std::vector<codec::VideoEncoderStats> output_stats;
 };
 

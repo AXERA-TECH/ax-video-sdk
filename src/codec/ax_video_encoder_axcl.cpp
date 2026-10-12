@@ -208,10 +208,10 @@ protected:
         const auto& cfg = config();
         const auto gop = cfg.gop == 0 ? 30U : cfg.gop;
         const bool intra = (qpmap_index_ % gop) == 0;
-        const std::int32_t base_qp = intra ? cfg.qpmap.i_qp : cfg.qpmap.p_qp;
+        const std::int32_t base_qp = QpMapBaseQp(intra);
         FillQpMap(map, qpmap_layout_, base_qp);
         if (!intra) {
-            ApplyQpMapRois(map, qpmap_layout_, qp_rois(), base_qp + cfg.qpmap.roi_qp_delta,
+            ApplyQpMapRois(map, qpmap_layout_, qp_rois(), QpMapRoiQp(base_qp),
                            cfg.width, cfg.height);
         }
         if (axclrtMemcpy(reinterpret_cast<void*>(qpmap_phy_[slot]), map, qpmap_layout_.size,
